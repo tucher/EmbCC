@@ -122,6 +122,7 @@ struct rec_machine {
     const char *dfp;                /* --dfp's directory, or 0 */
     const char **sets;              /* the board's inputs: --set NAME=VALUE */
     int nset;
+    int i2c_bus;                    /* the run had an I2C bus endpoint */
 };
 
 /* the analyses on for this run (from main.c's options), after sim_load;

@@ -388,6 +388,8 @@ struct sim {
     /* the time since reset in ns, from a part that models its clocks (the
      * RP2040's: its core runs at the clk_sys the program sets), or 0 */
     double (*now_ns)(struct sim *s);
+    /* the I2C bus endpoint (i2c-bus.c), or 0 */
+    struct i2cbus *i2c;
 };
 
 /* build the board with its core (`model`, or 0 for the board's own),
@@ -451,6 +453,34 @@ void rec_reset(struct sim *s, int reload);
 void rec_kill(struct sim *s);
 /* a byte of the program's output, which the record's end hashes */
 void rec_out(struct sim *s, int c);
+/* the run takes its inputs from a recording */
+int rec_replaying(struct sim *s);
+/* an exchange with the I2C bus endpoint: recorded; or, replaying, the
+ * recorded answer to `ask` (which must be the recorded ask) */
+void rec_i2c(struct sim *s, const char *ask, const char *answer);
+void rec_i2c_replay(struct sim *s, const char *ask, char *answer, size_t n);
+
+/* ---- the I2C bus endpoint (i2c-bus.c, i2c-bus.def) ---------------------- */
+
+/* --i2c-bus [HOST:]PORT: listen there and wait for the endpoint, or, when
+ * replaying, take its answers from the recording */
+void i2cbus_open(struct sim *s, const char *host, int port);
+/* an endpoint is on: without one, nothing outside the part is on its buses */
+int i2cbus_on(struct sim *s);
+/* the unit that drives bus `bus` (1 up), and how it takes a write another
+ * master starts on it at cycle `at`; it says how many of the write's bytes
+ * its slave acknowledged with i2cbus_delivered */
+void i2cbus_attach(struct sim *s, int bus, void *ctx,
+                   void (*inject)(void *ctx, u64 at, const u8 *b, int n));
+void i2cbus_delivered(struct sim *s, int bus, int count);
+/* the unit's master: its conditions, a byte it sends (1: a slave
+ * acknowledged it), a byte it reads, and its acknowledge of that byte */
+void i2cbus_start(struct sim *s, int bus);
+void i2cbus_restart(struct sim *s, int bus);
+void i2cbus_stop(struct sim *s, int bus);
+int i2cbus_write(struct sim *s, int bus, u8 byte);
+u8 i2cbus_read(struct sim *s, int bus);
+void i2cbus_master_ack(struct sim *s, int bus, int ack);
 
 /* ---- semihosting (semihost.c) ----------------------------------------- */
 

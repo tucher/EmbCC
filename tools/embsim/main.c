@@ -41,6 +41,27 @@ static u32 parse_size(const char *s)
     return (u32)v;
 }
 
+/* PORT, HOST:PORT, or QEMU's tcp::PORT: the port, and the host (empty for
+ * this machine's loopback addresses) */
+static int host_port(const char *opt, const char *arg, char *host, size_t size)
+{
+    const char *c = strrchr(arg, ':');
+    char *e;
+    long v = strtol(c ? c + 1 : arg, &e, 10);
+    if (*e || v <= 0 || v > 65535)
+        die("bad port in %s '%s'", opt, arg);
+    host[0] = 0;
+    if (c) {
+        const char *h = !strncmp(arg, "tcp:", 4) ? arg + 4 : arg;
+        size_t n = (size_t)(c - h);
+        if (n >= size)
+            die("bad host in %s '%s'", opt, arg);
+        memcpy(host, h, n);
+        host[n] = 0;
+    }
+    return (int)v;
+}
+
 static void usage(void)
 {
     fputs("usage: embsim IMAGE.elf|IMAGE.hex [--board NAME] [--cpu NAME]\n"
@@ -54,7 +75,7 @@ static void usage(void)
           "              [--stack-report[=FILE]] [--stack-limit ADDR|SYMBOL]\n"
           "              [--stack-su FILE.su]... [--stack-embrt FILE.json] [FILE.su...]\n"
           "              [--fault-report[=FILE]] [--disassemble[=FILE]]\n"
-          "              [--input FILE|-] [--record FILE]\n"
+          "              [--input FILE|-] [--record FILE] [--i2c-bus [HOST:]PORT]\n"
           "              [--dfp DIR] [--set NAME=VALUE]...\n"
           "       embsim [IMAGE.elf] --replay FILE [--count FILE] [--stats] ...\n"
           "       embsim --svd FILE.svd --svd-map\n"
@@ -137,7 +158,7 @@ static int part_pin_set(void *ctx, const char *name, const char *value)
 int main(int argc, char **argv)
 {
     const char *image = 0, *cpu = 0, *count_path = 0, *trace_path = 0;
-    const char *until = 0, *gdb = 0, *svd = 0, *trace_periph = 0;
+    const char *until = 0, *gdb = 0, *svd = 0, *trace_periph = 0, *i2c_bus = 0;
     const char *coverage = 0, *profile = 0;
     int svd_map = 0, tracing_periph = 0, board_given = 0, cov_lcov = 0;
     int profiling = 0, prof_fmt = 0, stk_report = 0;
@@ -181,6 +202,8 @@ int main(int argc, char **argv)
             semihosting = 0, semi_given = 1;
         else if (!strcmp(a, "--gdb") && more)
             gdb = argv[++i];
+        else if (!strcmp(a, "--i2c-bus") && more)
+            i2c_bus = argv[++i];
         else if (!strcmp(a, "--gdb-wait"))
             gdb_wait = 1;
         else if (!strcmp(a, "--set") && more)
@@ -264,9 +287,9 @@ int main(int argc, char **argv)
     struct rec *rp = 0;
     struct rec_machine rm;
     if (replay) {
-        if (input || record || gdb)
+        if (input || record || gdb || i2c_bus)
             die("--replay takes the run's inputs from the recording: not with "
-                "--input, --record or --gdb");
+                "--input, --record, --gdb or --i2c-bus");
         rp = rec_load(replay, &rm);
         if (!image)
             image = rm.image;
@@ -329,27 +352,14 @@ int main(int argc, char **argv)
     }
     if (!image)
         usage();
-    char host[256];
-    int port = 0;
-    if (gdb) {
-        /* PORT, HOST:PORT, or QEMU's tcp::PORT */
-        const char *c = strrchr(gdb, ':');
-        char *e;
-        long v = strtol(c ? c + 1 : gdb, &e, 10);
-        if (*e || v <= 0 || v > 65535)
-            die("bad port in --gdb '%s'", gdb);
-        port = (int)v;
-        host[0] = 0;
-        if (c) {
-            const char *h = !strncmp(gdb, "tcp:", 4) ? gdb + 4 : gdb;
-            size_t n = (size_t)(c - h);
-            if (n >= sizeof host)
-                die("bad host in --gdb '%s'", gdb);
-            memcpy(host, h, n);
-            host[n] = 0;
-        }
-    } else if (gdb_wait)
+    char host[256], i2c_host[256];
+    int port = 0, i2c_port = 0;
+    if (gdb)
+        port = host_port("--gdb", gdb, host, sizeof host);
+    else if (gdb_wait)
         die("--gdb-wait needs --gdb PORT");
+    if (i2c_bus)
+        i2c_port = host_port("--i2c-bus", i2c_bus, i2c_host, sizeof i2c_host);
 
     struct sim *s = &sim;
     sim_init(s, bd, cpu, svd);
@@ -401,7 +411,7 @@ int main(int argc, char **argv)
             "--fault-report read the image's symbols and lines: give its ELF "
             "file, not its HEX one");
     if (coverage || profiling || stk_report || stk_limit || fault_report ||
-        input || record || rp) {
+        input || record || rp || i2c_bus) {
         struct analysis *an = an_create(s, profiling || stk_report || stk_limit ||
                                                fault_report);
         if (coverage) {
@@ -433,7 +443,7 @@ int main(int argc, char **argv)
         }
         if (rp)
             rec_attach(s, rp, &rm);
-        else if (input || record)
+        else if (input || record || i2c_bus)
             rec_create(s);
         if (input)
             rec_input(s, input);
@@ -451,12 +461,17 @@ int main(int argc, char **argv)
             w.dfp = svd_dfp;
             w.sets = sets;
             w.nset = nset;
+            w.i2c_bus = i2c_bus != 0;
             rec_record(s, record, &w);
         }
         if (s->rec)
             rec_start(s);
     }
 
+    if (i2c_bus)
+        i2cbus_open(s, i2c_host[0] ? i2c_host : 0, i2c_port);
+    else if (rp && rm.i2c_bus)
+        i2cbus_open(s, 0, 0);
     if (gdb)
         gdb_serve(s, host[0] ? host : 0, port, gdb_wait);
     else

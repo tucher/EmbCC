@@ -576,7 +576,7 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                tools/embsim/image.c tools/embsim/analysis.c \
                tools/embsim/coverage.c tools/embsim/profile.c \
                tools/embsim/stack.c tools/embsim/fault.c \
-               tools/embsim/disasm.c tools/embsim/record.c \
+               tools/embsim/disasm.c tools/embsim/record.c tools/embsim/i2c-bus.c \
                tools/embsim/mips.c tools/embsim/malta.c \
                tools/embsim/atdf.c tools/embsim/pic32-evic.c \
                tools/embsim/pic32-cru.c tools/embsim/pic32-tmr.c \
@@ -608,7 +608,8 @@ EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/svd-map.h tools/embsvd/svd.h \
                tools/embsim/image.h tools/embsim/analysis.h \
                tools/embsim/disasm.h tools/embsim/mips.h tools/embsim/pic32.h \
-               tools/embsim/ieee754.h tools/embsim/pic24.h tools/embsim/rp2040.h
+               tools/embsim/ieee754.h tools/embsim/pic24.h tools/embsim/rp2040.h \
+               tools/embsim/i2c-bus.def
 # Optimized, unlike the other tools: a simulator's speed is the tests'
 # and the user's time, and -O2 runs a busy loop 2.5 (M3) to 3.6 (AVR)
 # times as fast as no -O. -g stays (it is in CFLAGS); `make EMBSIM_OPT=`

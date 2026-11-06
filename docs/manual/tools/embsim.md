@@ -27,6 +27,7 @@ embsim IMAGE.elf|IMAGE.hex [--board NAME] [--cpu NAME] [--ram-size SIZE]
                  [--stack-report[=FILE]] [--stack-limit ADDR|SYMBOL]
                  [--stack-su FILE.su]... [--stack-embrt FILE.json] [FILE.su...]
                  [--fault-report[=FILE]] [--input FILE|-] [--record FILE]
+                 [--i2c-bus [HOST:]PORT]
                  [--dfp DIR] [--set NAME=VALUE]... [--disassemble[=FILE]]
 embsim [IMAGE.elf] --replay FILE [--count FILE] [--stats] [...]
 embsim --svd FILE.svd --svd-map
@@ -2126,6 +2127,30 @@ A recorded debugging session -- breakpoints, `set var`, a register
 changed, a watchpoint -- replays without the debugger, so a run that
 went wrong once under gdb can be run again, and `--trace`d, `--profile`d
 or debugged again, exactly as it went.
+
+### The I2C bus endpoint: `--i2c-bus`
+
+`--i2c-bus [HOST:]PORT` puts what is on the part's I2C buses outside the
+part in a program of the user's. EmbSim listens on PORT (on HOST; by default
+this machine's loopback addresses) and waits for that program, the
+endpoint, to connect before the run starts. Its protocol has one
+definition, `tools/embsim/i2c-bus.def`, which a harness can read as well.
+
+The part's I2C units ask the endpoint and wait for its answer. Did a slave
+acknowledge the byte the master sent? What does the slave send for a read?
+Does another master start a write, and at which cycle? The endpoint is
+therefore stepped by the run: what it answers is a function of what it was
+asked, at the core's estimated cycles, never of when the host got round to
+it.
+
+- **Polling.** The run polls once the core reaches the cycle the last
+  `idle` named, and again after its own master's STOP, since a slave may
+  answer what it was sent.
+- **Another master's write** goes to the unit that drives that bus. A write
+  on a bus no unit of the part drives ends the run (status 2).
+- **Record and replay.** `--record` keeps every exchange with its step, and
+  `--replay` gives the recorded answers back with no endpoint. It checks the
+  run asks the same thing at the same step, or says where the runs diverged.
 
 ## The code as text: `--disassemble`
 

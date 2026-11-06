@@ -12,7 +12,9 @@
  *   - semihosting's SYS_READC, a byte of the host's stdin;
  *   - a debugger's writes to registers and memory, its `monitor reset`,
  *     the core it wakes from a sleep nothing else would end, and its
- *     `kill`.
+ *     `kill`;
+ *   - the I2C bus endpoint's answers (--i2c-bus, i2c-bus.c): each kept
+ *     with what it answered, which a replay checks it is asked again.
  * Time is not among them: every counter and timer runs on the core's
  * estimated cycles, never on the host's clock.
  *
@@ -42,9 +44,11 @@
 
 #define RX_POLL 4096
 
-enum { R_RX, R_EXC, R_READC, R_WAKE, R_REG, R_MEM, R_RESET, R_KILL };
+enum { R_RX, R_EXC, R_READC, R_WAKE, R_REG, R_MEM, R_RESET, R_KILL, R_I2C };
 static const char *const kinds[] = { "rx", "exc", "readc", "wake", "reg", "mem",
-                                     "reset", "kill" };
+                                     "reset", "kill", "i2c" };
+/* an i2c event's ask and answer, on its line */
+#define I2C_SEPARATOR " | "
 
 struct rev {
     u64 step, insns;
@@ -54,6 +58,7 @@ struct rev {
     u32 addr;                       /* mem's address */
     u8 *data;                       /* reg's and mem's bytes */
     int len;
+    char *ask, *answer;             /* i2c's exchange */
 };
 
 struct rec {
@@ -274,6 +279,30 @@ void rec_exc(struct sim *s, u32 n)
         r->at++;
 }
 
+int rec_replaying(struct sim *s)
+{
+    return s->rec && s->rec->replay;
+}
+
+void rec_i2c(struct sim *s, const char *ask, const char *answer)
+{
+    struct rec *r = s->rec;
+    if (r)
+        put_ev(r, steps(s) + 1, R_I2C, "%s%s%s", ask, I2C_SEPARATOR, answer);
+}
+
+void rec_i2c_replay(struct sim *s, const char *ask, char *answer, size_t n)
+{
+    struct rec *r = s->rec;
+    u64 st = steps(s) + 1;
+    if (r->at >= r->nev || r->ev[r->at].kind != R_I2C || r->ev[r->at].step != st)
+        diverged(s, "the I2C bus was asked '%s'; the recording has no exchange here", ask);
+    struct rev *e = &r->ev[r->at++];
+    if (strcmp(e->ask, ask))
+        diverged(s, "the I2C bus was asked '%s'; the recording asked '%s'", ask, e->ask);
+    snprintf(answer, n, "%s", e->answer);
+}
+
 int sim_readc(struct sim *s)
 {
     struct rec *r = s->rec;
@@ -366,7 +395,7 @@ void rec_step(struct sim *s)
     int woke = 0;
     while (r->at < r->nev && r->ev[r->at].step <= st) {
         struct rev *e = &r->ev[r->at];
-        if (e->kind == R_EXC || e->kind == R_READC || e->step < st)
+        if (e->kind == R_EXC || e->kind == R_READC || e->kind == R_I2C || e->step < st)
             diverged(s, "the recording has %s at step %llu, which did not come",
                      kinds[e->kind], (unsigned long long)e->step);
         if (e->insns != s->insns)
@@ -435,6 +464,7 @@ void rec_record(struct sim *s, const char *path, const struct rec_machine *m)
     fprintf(r->out, "dfp %s\n", m->dfp ? m->dfp : "-");
     for (int i = 0; i < m->nset; i++)
         fprintf(r->out, "set %s\n", m->sets[i]);
+    fprintf(r->out, "i2c-bus %d\n", m->i2c_bus);
     fprintf(r->out, "events\n");
 }
 
@@ -511,6 +541,8 @@ struct rec *rec_load(const char *path, struct rec_machine *m)
             m->input = atoi(v);
         else if (!strcmp(line, "dfp"))
             m->dfp = strcmp(v, "-") ? dup(v) : 0;
+        else if (!strcmp(line, "i2c-bus"))
+            m->i2c_bus = atoi(v);
         else if (!strcmp(line, "set")) {
             const char **ns = realloc((void *)m->sets,
                                       (size_t)(m->nset + 1) * sizeof *ns);
@@ -572,6 +604,15 @@ struct rec *rec_load(const char *path, struct rec_machine *m)
             break;
         }
         case R_READC: case R_RESET: e.v = strtol(p, 0, 10); break;
+        case R_I2C: {
+            const char *bar = strstr(p, I2C_SEPARATOR);
+            if (!bar)
+                die("%s: a bad event '%s'", path, big);
+            e.ask = xalloc((size_t)(bar - p) + 1);
+            memcpy(e.ask, p, (size_t)(bar - p));
+            e.answer = dup(bar + strlen(I2C_SEPARATOR));
+            break;
+        }
         case R_WAKE: case R_KILL: break;
         case R_REG: case R_MEM: {
             char *q;
