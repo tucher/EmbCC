@@ -187,6 +187,10 @@ void rec_input(struct sim *s, const char *path)
     if (!r->in)
         die("cannot read %s", path);
     setvbuf(r->in, 0, _IONBF, 0);       /* readiness is the descriptor's */
+    /* a console waits on what the UART answers: each byte reaches a pipe as
+     * it goes, not when stdio's buffer fills */
+    if (r->in == stdin)
+        setvbuf(stdout, 0, _IONBF, 0);
     s->rx_on = 1;
 }
 

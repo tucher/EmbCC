@@ -2050,7 +2050,9 @@ NS16550A and the AVR's USART0.
 A byte arrives when the host has one: the receiver is offered the next
 every 4096 steps while it is empty, and when the core would sleep with
 nothing else to wake it, the run waits for the host instead of ending.
-Typing into stdin makes an interactive console. Where the host's bytes
+Typing into stdin makes an interactive console, and with `--input -` the
+output is unbuffered: a program at the other end of a pipe reads each byte
+as the UART sends it. Where the host's bytes
 fall in the run depends on the host -- how fast the pipe delivers, when
 a person types -- and a program that counts its own time sees different
 counts each run:
