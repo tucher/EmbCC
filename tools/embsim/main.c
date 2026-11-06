@@ -95,6 +95,45 @@ static void usage(void)
 
 static struct sim sim;
 
+/* ---- a PIC24 or dsPIC33E part by its name: the pins --set drives -------------- */
+
+/* A part by its name has no board around it, so nothing outside drives its
+ * pins and an input reads its pull-up (CNPUx), else 0. --set RD5=low drives
+ * one for the whole run as a board's input would: R, the port's letter (no
+ * I), the bit, and low, high, 0 or 1. */
+#define PART_PINS 16
+static struct { int port, bit, level; } part_pin[PART_PINS];
+static int part_npin;
+
+static int part_pin_in(void *ctx, int port, int bit, int *level)
+{
+    (void)ctx;
+    for (int i = 0; i < part_npin; i++)
+        if (part_pin[i].port == port && part_pin[i].bit == bit) {
+            *level = part_pin[i].level;
+            return 1;
+        }
+    return 0;
+}
+
+static int part_pin_set(void *ctx, const char *name, const char *value)
+{
+    (void)ctx;
+    char *end;
+    if (name[0] != 'R' || name[1] < 'A' || name[1] > 'K' || name[1] == 'I' ||
+        part_npin == PART_PINS)
+        return -1;
+    long bit = strtol(name + 2, &end, 10);
+    int level = !strcmp(value, "high") || !strcmp(value, "1") ? 1 :
+                !strcmp(value, "low") || !strcmp(value, "0") ? 0 : -1;
+    if (end == name + 2 || *end || bit < 0 || bit > 31 || level < 0)
+        return -1;
+    part_pin[part_npin].port = name[1] - 'A' - (name[1] > 'I');
+    part_pin[part_npin].bit = (int)bit;
+    part_pin[part_npin++].level = level;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *image = 0, *cpu = 0, *count_path = 0, *trace_path = 0;
@@ -314,6 +353,10 @@ int main(int argc, char **argv)
 
     struct sim *s = &sim;
     sim_init(s, bd, cpu, svd);
+    if (!s->io.set && !s->io.pin_in && !strcmp(bd->core, "pic24")) {
+        s->io.set = part_pin_set;
+        s->io.pin_in = part_pin_in;
+    }
     for (int i = 0; i < nset; i++) {
         /* the board's inputs: --set temperature=30 */
         char name[64];

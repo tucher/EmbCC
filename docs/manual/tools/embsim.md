@@ -1560,6 +1560,12 @@ the timers, UART1-4 and the ports with ANSELx; and the dsPIC33E's own:
 - **The PMP** in its master modes, as the PIC32's (PMDIN1 its data
   register, its wait states instruction cycles).
 
+A part by its name has no board around it, so nothing outside drives its
+pins: an input reads its pull-up (CNPUx), else 0. `--set RD5=low` drives
+one for the whole run, as a board's input would -- `R`, the port's letter
+(there is no port I), the bit, and `low`, `high`, `0` or `1`; up to 16
+pins.
+
 `explorer16-32-dspic33` is the Explorer 16/32 with the dsPIC33EP512MU810
 PIM, whose pins are the board's 100-pin socket's as the
 PIC32MX795F512L PIM's: the LEDs on RA0-RA7, S3 (RD6), S4 (RD13), S5
