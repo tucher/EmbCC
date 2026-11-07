@@ -44,6 +44,11 @@ int net_write(int fd, const void *buf, int n)
     return -1;
 }
 
+void net_unlisten(int listener)
+{
+    (void)listener;
+}
+
 void net_close(int fd)
 {
     (void)fd;

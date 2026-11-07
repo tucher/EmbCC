@@ -265,7 +265,7 @@ void i2cbus_open(struct sim *s, const char *host, int port)
         die("--i2c-bus: cannot listen on port %d", port);
     fprintf(stderr, "embsim: --i2c-bus: waiting for the endpoint on port %d\n", port);
     b->fd = net_accept(listener, -1);
-    net_close(listener);
+    net_unlisten(listener);
     if (b->fd < 0)
         die("--i2c-bus: no endpoint connected");
     char line[LINE_MAX], answer[LINE_MAX];

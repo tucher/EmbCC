@@ -13,6 +13,9 @@ int net_listen(const char *host, int port);
 /* Wait up to `ms` milliseconds (-1: for ever) for a connection: its
  * handle, or -1 when none came. */
 int net_accept(int listener, int ms);
+/* Stop listening: a listener is not a connection's handle, so net_close
+ * does not take one. */
+void net_unlisten(int listener);
 /* 1 when `fd` has bytes to read (or has been closed) within `ms`
  * milliseconds (0: now, -1: for ever), else 0. */
 int net_ready(int fd, int ms);

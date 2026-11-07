@@ -111,6 +111,15 @@ int net_accept(int l, int ms)
     return -1;
 }
 
+void net_unlisten(int l)
+{
+    for (int i = 0; i < 2; i++)
+        if (lfds[l][i] >= 0) {
+            close(lfds[l][i]);
+            lfds[l][i] = -1;
+        }
+}
+
 int net_ready(int fd, int ms)
 {
     fd_set set;
