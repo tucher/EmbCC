@@ -465,6 +465,7 @@ void rec_record(struct sim *s, const char *path, const struct rec_machine *m)
     for (int i = 0; i < m->nset; i++)
         fprintf(r->out, "set %s\n", m->sets[i]);
     fprintf(r->out, "i2c-bus %d\n", m->i2c_bus);
+    fprintf(r->out, "reset-runs-on %d\n", m->reset_runs_on);
     fprintf(r->out, "events\n");
 }
 
@@ -543,6 +544,8 @@ struct rec *rec_load(const char *path, struct rec_machine *m)
             m->dfp = strcmp(v, "-") ? dup(v) : 0;
         else if (!strcmp(line, "i2c-bus"))
             m->i2c_bus = atoi(v);
+        else if (!strcmp(line, "reset-runs-on"))
+            m->reset_runs_on = atoi(v);
         else if (!strcmp(line, "set")) {
             const char **ns = realloc((void *)m->sets,
                                       (size_t)(m->nset + 1) * sizeof *ns);

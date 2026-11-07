@@ -350,6 +350,7 @@ struct sim {
     size_t until_len, until_at;     /* how much of it has matched */
     u64 max_insns;
     int semihosting;
+    int reset_runs_on;              /* --reset-runs-on: a part's RESET resets it */
     FILE *trace;                    /* --trace, or 0 */
     /* the devices that keep time: their tick hooks, flat, since they
      * are called after every instruction; and the devices themselves */
@@ -404,6 +405,9 @@ void sim_load(struct sim *s, u32 ram_size, const char *image);
  * the counts back to zero; memory as it is, or (reload) the image loaded
  * into it again */
 void sim_reset(struct sim *s, int reload);
+/* a part's own reset (a RESET instruction): its devices and core go to their
+ * reset state while time goes on, and the memories keep what they hold */
+void sim_part_reset(struct sim *s);
 /* one instruction, and the budget (--max-insns) */
 void sim_step(struct sim *s);
 /* run until the end */

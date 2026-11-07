@@ -76,6 +76,7 @@ static void usage(void)
           "              [--stack-su FILE.su]... [--stack-embrt FILE.json] [FILE.su...]\n"
           "              [--fault-report[=FILE]] [--disassemble[=FILE]]\n"
           "              [--input FILE|-] [--record FILE] [--i2c-bus [HOST:]PORT]\n"
+          "              [--reset-runs-on]\n"
           "              [--dfp DIR] [--set NAME=VALUE]...\n"
           "       embsim [IMAGE.elf] --replay FILE [--count FILE] [--stats] ...\n"
           "       embsim --svd FILE.svd --svd-map\n"
@@ -120,8 +121,9 @@ static struct sim sim;
 
 /* A part by its name has no board around it, so nothing outside drives its
  * pins and an input reads its pull-up (CNPUx), else 0. --set RD5=low drives
- * one for the whole run as a board's input would: R, the port's letter (no
- * I), the bit, and low, high, 0 or 1. */
+ * one as a board's input would: R, the port's letter (no I), the bit, and
+ * low, high, 0 or 1; --i2c-bus's endpoint sets one while the run goes, and
+ * "undriven" stops driving it. */
 #define PART_PINS 16
 static struct { int port, bit, level; } part_pin[PART_PINS];
 static int part_npin;
@@ -137,21 +139,36 @@ static int part_pin_in(void *ctx, int port, int bit, int *level)
     return 0;
 }
 
+#define PIN_UNDRIVEN (-2)
+
 static int part_pin_set(void *ctx, const char *name, const char *value)
 {
     (void)ctx;
     char *end;
-    if (name[0] != 'R' || name[1] < 'A' || name[1] > 'K' || name[1] == 'I' ||
-        part_npin == PART_PINS)
+    if (name[0] != 'R' || name[1] < 'A' || name[1] > 'K' || name[1] == 'I')
         return -1;
     long bit = strtol(name + 2, &end, 10);
     int level = !strcmp(value, "high") || !strcmp(value, "1") ? 1 :
-                !strcmp(value, "low") || !strcmp(value, "0") ? 0 : -1;
-    if (end == name + 2 || *end || bit < 0 || bit > 31 || level < 0)
+                !strcmp(value, "low") || !strcmp(value, "0") ? 0 :
+                !strcmp(value, "undriven") ? PIN_UNDRIVEN : -1;
+    if (end == name + 2 || *end || bit < 0 || bit > 31 || level == -1)
         return -1;
-    part_pin[part_npin].port = name[1] - 'A' - (name[1] > 'I');
-    part_pin[part_npin].bit = (int)bit;
-    part_pin[part_npin++].level = level;
+    int port = name[1] - 'A' - (name[1] > 'I'), i = 0;
+    while (i < part_npin && !(part_pin[i].port == port && part_pin[i].bit == bit))
+        i++;
+    if (level == PIN_UNDRIVEN) {
+        if (i < part_npin)
+            part_pin[i] = part_pin[--part_npin];
+        return 0;
+    }
+    if (i == part_npin) {
+        if (part_npin == PART_PINS)
+            return -1;
+        part_npin++;
+    }
+    part_pin[i].port = port;
+    part_pin[i].bit = (int)bit;
+    part_pin[i].level = level;
     return 0;
 }
 
@@ -171,7 +188,7 @@ int main(int argc, char **argv)
     int nsu = 0, nset = 0;
     u32 ram_size = 0;
     u64 max_insns = 0;
-    int stats = 0, verbose = 0, semihosting = 1, gdb_wait = 0;
+    int stats = 0, verbose = 0, semihosting = 1, gdb_wait = 0, reset_runs_on = 0;
     const struct board_desc *bd = &boards[0];
     const char *board_name = 0;
     for (int i = 1; i < argc; i++) {
@@ -204,6 +221,8 @@ int main(int argc, char **argv)
             gdb = argv[++i];
         else if (!strcmp(a, "--i2c-bus") && more)
             i2c_bus = argv[++i];
+        else if (!strcmp(a, "--reset-runs-on"))
+            reset_runs_on = 1;
         else if (!strcmp(a, "--gdb-wait"))
             gdb_wait = 1;
         else if (!strcmp(a, "--set") && more)
@@ -308,6 +327,9 @@ int main(int argc, char **argv)
         if (semi_given && semihosting != rm.semihosting)
             die("--no-semihosting: the recording ran with semihosting");
         semihosting = rm.semihosting;
+        if (reset_runs_on && !rm.reset_runs_on)
+            die("--reset-runs-on: the recording's RESET ended its run");
+        reset_runs_on = rm.reset_runs_on;
         if (max_insns && max_insns != rm.max_insns)
             die("--max-insns: the recording ran with %llu", (unsigned long long)rm.max_insns);
         max_insns = rm.max_insns;
@@ -389,6 +411,7 @@ int main(int argc, char **argv)
     s->until_len = until ? strlen(until) : 0;
     s->max_insns = max_insns;
     s->semihosting = semihosting;
+    s->reset_runs_on = reset_runs_on;
     if (trace_path)
         trace_open(s, trace_path);
     sim_load(s, ram_size, image);
@@ -462,6 +485,7 @@ int main(int argc, char **argv)
             w.sets = sets;
             w.nset = nset;
             w.i2c_bus = i2c_bus != 0;
+            w.reset_runs_on = reset_runs_on;
             rec_record(s, record, &w);
         }
         if (s->rec)

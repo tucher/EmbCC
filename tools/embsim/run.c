@@ -207,6 +207,17 @@ void sim_reset(struct sim *s, int reload)
         s->cpu->ops->reset(s->cpu);
 }
 
+/* The counts go on, and so do the clock's holders outside the part (an I2C
+ * endpoint's): the devices drop their own as they reset. */
+void sim_part_reset(struct sim *s)
+{
+    for (int i = 0; i < s->bus.ndev; i++)
+        if (s->bus.dev[i].ops->reset)
+            s->bus.dev[i].ops->reset(s->bus.dev[i].ctx);
+    s->ev_known = 0;
+    s->cpu->ops->reset(s->cpu);
+}
+
 /* one step and the budget: the loop's body, for the GDB server's loop
  * too */
 void sim_step(struct sim *s)

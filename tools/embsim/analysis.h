@@ -123,6 +123,7 @@ struct rec_machine {
     const char **sets;              /* the board's inputs: --set NAME=VALUE */
     int nset;
     int i2c_bus;                    /* the run had an I2C bus endpoint */
+    int reset_runs_on;              /* --reset-runs-on */
 };
 
 /* the analyses on for this run (from main.c's options), after sim_load;

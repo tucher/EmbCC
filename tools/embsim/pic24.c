@@ -106,6 +106,26 @@ u32 pic24_prog(struct sim *s, u32 addr)
 
 /* ---- ending the run, traps ------------------------------------------------ */
 
+/* RESET with --reset-runs-on: the part resets and starts again at its reset
+ * vector. RCON keeps the flags it had and gains SWR (the data sheet's
+ * Register 8-1); the PC is the reset's, not the next instruction's. */
+#define RCON_SWR 0x0040u
+
+static int software_reset(void)
+{
+    struct sim *s = ps->sim;
+    struct rf_periph *p = s->svd ? rf_periph(s->svd, "RCON") : 0;
+    struct rf_reg *rcon = p ? rf_reg(p, "RCON") : 0;
+    if (!rcon)
+        die("--reset-runs-on: the part's register map has no RCON");
+    u64 flags = rcon->value;
+    sim_part_reset(s);
+    rcon->value = flags | RCON_SWR;
+    ps->npc = ps->pc;
+    ps->changed = 1;
+    return 1;
+}
+
 static int illegal(const char *why)
 {
     sim_end(ps->sim, END_LOCKUP, "lockup: %s at 0x%06x (the part resets: "
@@ -1643,6 +1663,8 @@ static int exec(u32 i)
         }
         switch (i & 0xffff) {
         case 0x0000:                            /* RESET */
+            if (ps->sim->reset_runs_on)
+                return software_reset();
             sim_end(ps->sim, END_EXIT, "RESET at 0x%06x", (unsigned)ps->pc);
             return 0;
         case 0x4000: case 0x4001:               /* PWRSAV #0, #1 */

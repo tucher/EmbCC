@@ -1726,7 +1726,7 @@ unless `--no-semihosting` is given. It handles:
 | the image stores 0x3333 to the test device | the upper halfword stored |
 | the image writes 0x42 to malta's SOFTRES | 0 |
 | the image sets the ESP32-C3's RTC_CNTL OPTIONS0.SW_SYS_RST | 0 |
-| a PIC24's RESET instruction | 0 |
+| a PIC24's RESET instruction, without `--reset-runs-on` | 0 |
 | the image requests a reset (AIRCR.SYSRESETREQ) | 0 |
 | a branch to itself, or a WFI, MIPS wait or PIC24 PWRSAV, that no exception or interrupt can interrupt | 0 |
 | an AVR SLEEP that nothing can wake (the AVR harness ends in such a loop) | 0 |
@@ -2165,9 +2165,23 @@ it.
   answer what it was sent.
 - **Another master's write** goes to the unit that drives that bus. A write
   on a bus no unit of the part drives ends the run (status 2).
+- **The part's inputs.** A poll can also answer that an input takes a value
+  at that cycle, as `--set NAME=VALUE` gives it for a whole run: a pin of a
+  part by its name goes `low` or `high`, or `undriven`, to its pull-up. The
+  run polls again at once. An input the board has not got ends the run.
 - **Record and replay.** `--record` keeps every exchange with its step, and
   `--replay` gives the recorded answers back with no endpoint. It checks the
   run asks the same thing at the same step, or says where the runs diverged.
+
+### A PIC24's reset that runs on: `--reset-runs-on`
+
+A PIC24's RESET instruction ends the run by default, which is how a test
+program stops. With `--reset-runs-on` it resets the part, as on silicon: the
+devices and the core go to their reset state, the core starts again at the
+reset vector, and RCON keeps the flags it had and gains SWR. Time goes on, and
+the memories keep what they hold. A firmware that resets itself on command,
+as a bootloader's application does to hand back to it, needs it. A recording
+keeps the option, and its replay runs with it.
 
 ## The code as text: `--disassemble`
 

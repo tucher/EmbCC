@@ -10,7 +10,9 @@
  *   - A write another master starts goes to the unit that drives that bus
  *     (i2cbus_attach), which clocks it into its slave and says how far the
  *     slave acknowledged it (i2cbus_delivered). A bus no unit drives ends
- *     the run: nothing in the part could take the write. */
+ *     the run: nothing in the part could take the write.
+ *   - An input the endpoint sets goes to the board as --set's would; one the
+ *     board has not got ends the run. */
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -204,6 +206,19 @@ static void poll_tick(void *ctx, u32 cycles)
         if (until <= s->cycles)
             die("--i2c-bus: idle until %llu, which the run has reached", (unsigned long long)until);
         b->next_poll = until;
+        return;
+    }
+    if (kind == ANSWER_PIN) {
+        char name[64];
+        const char *value = strchr(p, ' ');
+        size_t n = value ? (size_t)(value - p) : 0;
+        if (!n || n >= sizeof name || !value[1] || strchr(value + 1, ' '))
+            die("--i2c-bus: a bad pin '%s'", answer);
+        memcpy(name, p, n);
+        name[n] = 0;
+        if (!s->io.set || s->io.set(s->io.ctx, name, value + 1))
+            die("--i2c-bus: '%s': the board has no input %s that takes %s", answer, name, value + 1);
+        b->next_poll = s->cycles;
         return;
     }
     char *e;

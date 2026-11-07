@@ -1,6 +1,7 @@
 /* i2c-bus.def -- the protocol between a part's I2C units and a bus endpoint
  * outside the run (--i2c-bus), the one definition of it: i2c-bus.c includes
- * it, and a harness reads the same lines.
+ * it, and a harness reads the same lines. The endpoint is the part's whole
+ * outside, so it also drives the part's inputs, as --set does for a run.
  *
  * EmbSim sends an ASK line and waits for its one ANSWER line, so what the
  * endpoint answers is a function of what it was asked, never of when the
@@ -14,14 +15,18 @@
  * I2C_ASK(NAME, words, its answers' names separated by spaces)
  * I2C_ANSWER(NAME, words) */
 
-I2C_VERSION(1)
+I2C_VERSION(2)
 
 /* Before the run reaches UNTIL nothing happens outside; or another master
- * starts a write on BUS at AT: its address byte, then its data bytes. */
+ * starts a write on BUS at AT: its address byte, then its data bytes; or, at
+ * CYCLE, the input NAME takes VALUE as --set NAME=VALUE gives it, and
+ * "undriven" leaves a pin to the part's pull-up. The run polls again at once
+ * after a pin. */
 I2C_ASK(HELLO, "hello VERSION", "OK")
-I2C_ASK(POLL, "poll CYCLE", "IDLE MASTER")
+I2C_ASK(POLL, "poll CYCLE", "IDLE MASTER PIN")
 I2C_ANSWER(IDLE, "idle UNTIL")
 I2C_ANSWER(MASTER, "master AT BUS BYTE...")
+I2C_ANSWER(PIN, "pin NAME VALUE")
 /* how many of that write's bytes, its address byte the first, the part's
  * slave acknowledged */
 I2C_ASK(DELIVERED, "delivered CYCLE BUS COUNT", "OK")
