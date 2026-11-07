@@ -1577,12 +1577,20 @@ the timers, UART1-4 and the ports with ANSELx; and the dsPIC33E's own:
   - **Not modelled**, which ends the run so stating: slave transmission,
     10-bit addresses, a general call, the IPMI mode, a bus collision or
     arbitration, and the master writing to the part's own address.
+- **The flash controller (NVM)**, by the family reference manual's Flash
+  Programming section (DS70609) and the data sheet's section 5, as the
+  PIC24F's above with this family's NVMOP codes: two words (0001), a row
+  (0010), a page's erase (0011). The core stalls for the data sheet's time
+  in FRC cycles (355 a word pair, 11064 a row, 168517 an erase) at the
+  part's instruction clock. A configuration byte (0000) and the bulk erases
+  (1010, 1101) end the run as not modelled; a reserved NVMOP sets WRERR.
 
 A part by its name has no board around it, so nothing outside drives its
 pins: an input reads its pull-up (CNPUx), else 0. `--set RD5=low` drives
-one for the whole run, as a board's input would -- `R`, the port's letter
-(there is no port I), the bit, and `low`, `high`, `0` or `1`; up to 16
-pins.
+one as a board's input would -- `R`, the port's letter (there is no port
+I), the bit, and `low`, `high`, `0` or `1`; up to 16 pins -- and the I2C
+endpoint sets one while the run goes, `undriven` leaving it to its
+pull-up.
 
 `explorer16-32-dspic33` is the Explorer 16/32 with the dsPIC33EP512MU810
 PIM, whose pins are the board's 100-pin socket's as the

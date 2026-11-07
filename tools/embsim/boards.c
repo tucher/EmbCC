@@ -121,7 +121,8 @@ static const struct model_desc pic24f_models[] = {
 
 /* a dsPIC33EP's or a PIC24EP's models, over its EDC: the interrupt
  * controller, the oscillator, the PPS lock, the timers, the UARTs, the
- * ports, the SPI units, ADC1, the PMP, the I2C units */
+ * ports, the SPI units, ADC1, the PMP, the I2C units, the flash
+ * controller */
 static const struct model_desc pic24e_models[] = {
     { "INT", "pic24-intc" },
     { "OSC", "pic24-osc" },
@@ -133,6 +134,7 @@ static const struct model_desc pic24e_models[] = {
     { "ADC1", "pic24e-adc" },
     { "PMP", "pic24e-pmp" },
     { "I2C", "pic24e-i2c" },
+    { "NVM", "pic24e-nvm" },
     { 0, 0 },
 };
 
@@ -469,6 +471,7 @@ static const struct model_type model_types[] = {
     { "pic24-uart", &pic24_uart_ops, pic24_uart_create },
     { "pic24-tmr", &pic24_tmr_ops, pic24_tmr_create },
     { "pic24-nvm", &pic24_nvm_ops, pic24_nvm_create },
+    { "pic24e-nvm", &pic24e_nvm_ops, pic24e_nvm_create },
     { "pic24-rtcc", &pic24_rtcc_ops, pic24_rtcc_create },
     { "pic24-dma", &pic24_dma_ops, pic24_dma_create },
     { "pic24-i2c", &pic24_i2c_ops, pic24_i2c_create },

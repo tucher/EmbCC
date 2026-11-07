@@ -1,6 +1,9 @@
 /* pic24-nvm.c -- a PIC24FJ's flash controller (NVMCON, NVMADR, NVMADRU,
  * NVMKEY: the EDC's NVM), programming the part's own program memory
- * (RTSP), as the data sheet's section 6 has it.
+ * (RTSP), as the data sheet's section 6 has it; and a dsPIC33EP's or a
+ * PIC24EP's (pic24e-nvm), as the FRM's Flash Programming section (DS70609)
+ * and the data sheet's section 5 (DS70616) have it, which differs in its
+ * NVMOP codes and its times.
  *
  *   - The write latches: 128 instruction words that TBLWTL and TBLWTH
  *     write with TBLPAG 0xFA (0xFA0000-0xFA00FE), and the table reads
@@ -19,7 +22,16 @@
  *     part has not, sets WRERR instead.
  * The unlock is the core's (pic24_unlocked): the RTCC's WRLOCK takes the
  * same one. Not modelled: the dual partition modes (BOOTSWP, NVMOP 0100
- * and 1000), the code protection. */
+ * and 1000), the code protection.
+ *
+ * pic24e-nvm: 0001 two words, 0010 a row (128 words), 0011 a page's erase
+ * (1024 words), the CPU stalled for the data sheet's time in FRC cycles
+ * (355, 11064, 168517: D138, D136, D137) at the part's instruction clock.
+ * The part's other operations -- 0000 a configuration byte, 1010 and 1101
+ * the bulk erases -- end the run as "not modelled": its firmwares do not
+ * use them; a reserved NVMOP sets WRERR. NVMCON resets on any reset, where
+ * the part keeps it but for a POR: its firmwares write it whole before each
+ * operation. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -31,12 +43,52 @@
 #define NVM_WREN    (1u << 14)
 #define NVM_WRERR   (1u << 13)
 
+enum { OP_WORDS, OP_ROW, OP_PAGE, OP_USER, OP_NOT_MODELLED };
+
+/* an NVMOP the family has: what it does, and for how long the CPU stalls,
+ * in the family's unit of time */
+struct nvm_op {
+    u8 nvmop, what;
+    u32 time;
+    const char *name;
+};
+
+struct nvm_family {
+    const struct nvm_op *ops;
+    u32 time_hz;                    /* the times' unit, per second */
+};
+
+/* PIC24FJ: the data sheet's typical times, in microseconds */
+static const struct nvm_op pic24f_ops[] = {
+    { 0x1, OP_WORDS, 20, "two words" },
+    { 0x2, OP_ROW, 1500, "a row" },
+    { 0x3, OP_PAGE, 20000, "a page's erase" },
+    { 0xe, OP_USER, 20000, "the user memory's erase" },
+    { 0, 0, 0, 0 },
+};
+
+/* dsPIC33EP/PIC24EP: DS70616 D136-D138, in FRC cycles */
+#define FRC_HZ 7370000u
+static const struct nvm_op pic24e_ops[] = {
+    { 0x1, OP_WORDS, 355, "two words" },
+    { 0x2, OP_ROW, 11064, "a row" },
+    { 0x3, OP_PAGE, 168517, "a page's erase" },
+    { 0x0, OP_NOT_MODELLED, 0, "a configuration byte" },
+    { 0xa, OP_NOT_MODELLED, 0, "the auxiliary memory's bulk erase" },
+    { 0xd, OP_NOT_MODELLED, 0, "the primary memory's bulk erase" },
+    { 0, 0, 0, 0 },
+};
+
+static const struct nvm_family pic24f = { pic24f_ops, 1000000u };
+static const struct nvm_family pic24e = { pic24e_ops, FRC_HZ };
+
 struct nvm {
     struct sim *s;
     struct rf_periph *p;
     struct rf_reg *con, *adr, *adru, *key;
     u32 latch[128];
     int irq;
+    const struct nvm_family *family;
     struct pic24_nvm core;
 };
 
@@ -93,14 +145,22 @@ static void erase(struct nvm *m, u32 a, u32 words)
     }
 }
 
-/* the CPU stalled for us microseconds */
-static void stall(struct nvm *m, u32 us)
+/* the CPU stalled for `time` in the family's unit */
+static void stall(struct nvm *m, u32 time)
 {
     struct sim *s = m->s;
-    u32 n = (u32)((u64)pic24_fcy(s) * us / 1000000u);
+    u32 n = (u32)((u64)pic24_fcy(s) * time / m->family->time_hz);
     s->cycles += n;
     if (s->counting)
         sim_advance(s, n);
+}
+
+static const struct nvm_op *nvm_op(const struct nvm *m, u32 nvmop)
+{
+    for (const struct nvm_op *o = m->family->ops; o->name; o++)
+        if (o->nvmop == nvmop)
+            return o;
+    return 0;
 }
 
 static void start(struct nvm *m)
@@ -111,15 +171,20 @@ static void start(struct nvm *m)
         rf_hw(m->con, (con & ~NVM_WR) | NVM_WRERR);
         return;
     }
-    switch (con & 15) {
-    case 0x1: program(m, a & ~3u, 2); stall(m, 20); break;
-    case 0x2: program(m, a & ~0xffu, 128); stall(m, 1500); break;
-    case 0x3: erase(m, a & ~0x7ffu, 1024); stall(m, 20000); break;
-    case 0xe: erase(m, 0, ((struct pic24_state *)m->s->cpu)->prog_end / 2); stall(m, 20000); break;
-    default:
+    const struct nvm_op *o = nvm_op(m, con & 15);
+    if (!o) {
         rf_hw(m->con, (con & ~NVM_WR) | NVM_WRERR);
         return;
     }
+    switch (o->what) {
+    case OP_WORDS: program(m, a & ~3u, 2); break;
+    case OP_ROW: program(m, a & ~0xffu, 128); break;
+    case OP_PAGE: erase(m, a & ~0x7ffu, 1024); break;
+    case OP_USER: erase(m, 0, ((struct pic24_state *)m->s->cpu)->prog_end / 2); break;
+    default:
+        die("NVM: not modelled: NVMOP %u, %s", (unsigned)(con & 15), o->name);
+    }
+    stall(m, o->time);
     rf_hw(m->con, con & ~(NVM_WR | NVM_WRERR));
     if (m->irq >= 0)
         pic24_irq(m->s, m->irq);
@@ -155,13 +220,18 @@ const struct dev_ops pic24_nvm_ops = {
     "pic24-nvm", nvm_read, nvm_write, nvm_reset, 0, 0,
 };
 
-void *pic24_nvm_create(struct sim *s, struct rf_periph *p)
+const struct dev_ops pic24e_nvm_ops = {
+    "pic24e-nvm", nvm_read, nvm_write, nvm_reset, 0, 0,
+};
+
+static void *create(struct sim *s, struct rf_periph *p, const struct nvm_family *family)
 {
     struct nvm *m = calloc(1, sizeof *m);
     if (!m)
         die("out of memory");
     m->s = s;
     m->p = p;
+    m->family = family;
     m->con = rf_reg(p, "NVMCON");
     m->adr = rf_reg(p, "NVMADR");
     if (!m->adr)
@@ -181,4 +251,14 @@ void *pic24_nvm_create(struct sim *s, struct rf_periph *p)
     pic24_nvm_attach(s, &m->core);
     nvm_reset(m);
     return m;
+}
+
+void *pic24_nvm_create(struct sim *s, struct rf_periph *p)
+{
+    return create(s, p, &pic24f);
+}
+
+void *pic24e_nvm_create(struct sim *s, struct rf_periph *p)
+{
+    return create(s, p, &pic24e);
 }

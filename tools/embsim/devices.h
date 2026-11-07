@@ -81,7 +81,7 @@ void *pic24e_adc_create(struct sim *s, struct rf_periph *p);
 /* a PIC24's peripheral models, over its EDC's registers (pic24.h) */
 extern const struct dev_ops pic24_intc_ops, pic24_adc_ops, pic24_epmp_ops;
 extern const struct dev_ops pic24_spi_ops, pic24_uart_ops, pic24_tmr_ops;
-extern const struct dev_ops pic24_osc_ops, pic24_pps_ops, pic24_nvm_ops;
+extern const struct dev_ops pic24_osc_ops, pic24_pps_ops, pic24_nvm_ops, pic24e_nvm_ops;
 extern const struct dev_ops pic24_rtcc_ops;
 void *pic24_intc_create(struct sim *s, struct rf_periph *p);
 void *pic24_uart_create(struct sim *s, struct rf_periph *p);
@@ -92,6 +92,7 @@ void *pic24_adc_create(struct sim *s, struct rf_periph *p);
 void *pic24_epmp_create(struct sim *s, struct rf_periph *p);
 void *pic24_spi_create(struct sim *s, struct rf_periph *p);
 void *pic24_nvm_create(struct sim *s, struct rf_periph *p);
+void *pic24e_nvm_create(struct sim *s, struct rf_periph *p);
 void *pic24_rtcc_create(struct sim *s, struct rf_periph *p);
 /* the hardware sets interrupt irq's flag (IFSx), as the EDC numbers it;
  * the flag; an interrupt's number by the EDC's name (T1, ADC1), or -1 */
