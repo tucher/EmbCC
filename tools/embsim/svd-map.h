@@ -92,6 +92,9 @@ struct rf_periph {
     u64 gate_mask;
     const char *gate_name;          /* RCC.APB1ENR.USART2EN */
     int gate_warned, gate_held;
+    /* a model whose ticks may wait (rf_lag): 1 and the cycles until it next
+     * acts beyond its own registers, or 0 when it will not until accessed */
+    int (*next_effect)(void *ctx, u32 *cycles);
 };
 
 /* a model type: the catalogue is in boards.c */
@@ -188,5 +191,10 @@ int rf_y_space(struct svdmap *m, u32 *lo, u32 *hi);
  * is called after each instruction and its next_event asked (sim_clock,
  * for a model); `*running` is the model's own record of it */
 void rf_clock(struct rf_periph *p, int *running, int on);
+/* the model's ticks may wait until `next_effect`'s cycles have passed: what it
+ * does before then is seen only in its registers, so it is caught up before
+ * any access to the peripherals and before any question of the next event.
+ * At its effect it ticks in the step's order, as every model does each step. */
+void rf_lag(struct rf_periph *p, int (*next_effect)(void *ctx, u32 *cycles));
 
 #endif

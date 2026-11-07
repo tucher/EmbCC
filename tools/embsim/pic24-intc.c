@@ -41,12 +41,19 @@ struct intc {
      * the capture and compare modules' sync sources) */
     struct { void (*fn)(void *ctx, int ev, u64 when); void *ctx; } listen[8];
     int nlisten;
+    /* the request presented, as last worked out: it changes only with a
+     * flag, an enable, a priority or GIE, which every write here and every
+     * flag a model raises makes unknown */
+    int req_known, req_best, req_irq;
 };
 
+static int request(void *ctx, int *irq);
+
+/* the controller the core has attached (pic24_intc_attach), or 0 */
 static struct intc *intc_of(struct sim *s)
 {
-    struct rf_periph *p = s->svd ? rf_periph(s->svd, "INT") : 0;
-    return p && p->ops == &pic24_intc_ops ? p->ctx : 0;
+    struct pic24_intc *ic = pic24_is(s->cpu) ? ((struct pic24_state *)s->cpu)->intc : 0;
+    return ic && ic->request == request ? ic->ctx : 0;
 }
 
 static int prio(const struct intc *c, int irq)
@@ -58,6 +65,12 @@ static int prio(const struct intc *c, int irq)
 static int request(void *ctx, int *irq)
 {
     struct intc *c = ctx;
+    if (c->req_known) {
+        *irq = c->req_irq;
+        return c->req_best;
+    }
+    c->req_known = 1;
+    c->req_best = 0;
     if (c->intcon2 && !(c->intcon2->value & 0x8000))
         return 0;
     int best = 0;
@@ -75,6 +88,8 @@ static int request(void *ctx, int *irq)
             }
         }
     }
+    c->req_best = best;
+    c->req_irq = best ? *irq : 0;
     return best;
 }
 
@@ -127,11 +142,13 @@ static void intc_write(void *ctx, u32 off, int n, u32 v)
 {
     struct intc *c = ctx;
     rf_write(c->p, off, n, v);
+    c->req_known = 0;
 }
 
 static void intc_reset(void *ctx)
 {
-    (void)ctx;
+    struct intc *c = ctx;
+    c->req_known = 0;
 }
 
 const struct dev_ops pic24_intc_ops = {
@@ -149,8 +166,10 @@ void pic24_irq_at(struct sim *s, int irq, u64 when)
     if (!c || irq < 0 || irq / 16 >= c->nw)
         return;
     struct rf_reg *r = c->ifs[irq / 16];
-    if (!(r->value >> (irq % 16) & 1))
+    if (!(r->value >> (irq % 16) & 1)) {
         rf_hw(r, r->value | 1u << (irq % 16));
+        c->req_known = 0;
+    }
     pic24_event(s, irq, when);
 }
 

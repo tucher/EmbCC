@@ -235,19 +235,30 @@ void sim_step(struct sim *s)
 }
 
 /* Several parts in one run: each step goes to the part furthest behind in
- * cycles, so the parts stay within an instruction of each other; the run
- * ends when one of them ends. */
+ * cycles (of those level, the first), so the parts stay within an
+ * instruction of each other; the run ends when one of them ends. A part's
+ * step moves no other part's cycles and ends no other part, so the part
+ * chosen keeps the steps until it passes the one next behind it. */
 struct sim *sim_run_parts(struct sim *const *part, int n)
 {
     for (;;) {
-        struct sim *next = 0;
+        int next = -1, rival = -1;
         for (int i = 0; i < n; i++) {
             if (part[i]->state != RUN)
                 return part[i];
-            if (!next || part[i]->cycles < next->cycles)
-                next = part[i];
+            if (next < 0 || part[i]->cycles < part[next]->cycles) {
+                rival = next;
+                next = i;
+            } else if (rival < 0 || part[i]->cycles < part[rival]->cycles) {
+                rival = i;
+            }
         }
-        sim_step(next);
+        struct sim *s = part[next];
+        u64 bound = rival < 0 ? ~0ull : part[rival]->cycles;
+        int first = rival < 0 || next < rival;
+        do
+            sim_step(s);
+        while (s->state == RUN && (s->cycles < bound || (first && s->cycles == bound)));
     }
 }
 

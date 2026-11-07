@@ -232,6 +232,8 @@ void *pic24e_adc_create(struct sim *s, struct rf_periph *p)
         die("out of memory");
     a->s = s;
     a->p = p;
+    /* a conversion's end is its only effect: the input read, the flag */
+    rf_lag(p, adc_next_event);
     a->con1 = rf_reg(p, "AD1CON1");
     a->con2 = rf_reg(p, "AD1CON2");
     a->con3 = rf_reg(p, "AD1CON3");

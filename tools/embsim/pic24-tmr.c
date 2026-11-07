@@ -13,7 +13,9 @@
  *     latches it;
  *   - a write to TMRx or TxCON clears the prescaler's count; PRx is
  *     0xFFFF out of reset.
- * TMRx is kept current as the core runs. Not modelled: the external
+ * TMRx is current whenever the program can read it: between period
+ * matches, where nothing but the count changes, the model's ticks may wait
+ * (rf_lag). Not modelled: the external
  * clocks (TCS: the timer stops, with no clock on its pin), gated
  * accumulation, Timer1's asynchronous mode. */
 #include <stdlib.h>
@@ -133,21 +135,27 @@ static void tmr_tick(void *ctx, u32 cycles)
     }
 }
 
-/* when a flag whose interrupt is enabled next sets */
-static int tmr_next(void *ctx, u32 *cycles)
+/* the cycles until running timer n next matches its period */
+static u64 to_match(const struct tmrs *m, int n)
 {
-    struct tmrs *m = ctx;
+    u64 c = count_of(m, n), pr = period_of(m, n);
+    u64 top = t32(m, n) ? 0xffffffffull : 0xffff;
+    u64 ticks = c <= pr ? pr - c + 1 : top - c + 1 + pr + 1;
+    return ticks * divisor(&m->t[n]) - m->t[n].acc;
+}
+
+/* the first match of the running timers, those whose interrupt is enabled
+ * (`enabled_only`) or all */
+static int first_match(const struct tmrs *m, int enabled_only, u32 *cycles)
+{
     u64 best = ~0ull;
     for (int n = 1; n <= NT; n++) {
         if (!on(m, n))
             continue;
         int irq = t32(m, n) ? m->t[n + 1].irq : m->t[n].irq;
-        if (!pic24_irq_enabled(m->s, irq))
+        if (enabled_only && !pic24_irq_enabled(m->s, irq))
             continue;
-        u64 c = count_of(m, n), pr = period_of(m, n);
-        u64 top = t32(m, n) ? 0xffffffffull : 0xffff;
-        u64 ticks = c <= pr ? pr - c + 1 : top - c + 1 + pr + 1;
-        u64 cyc = ticks * divisor(&m->t[n]) - m->t[n].acc;
+        u64 cyc = to_match(m, n);
         if (cyc < best)
             best = cyc;
     }
@@ -155,6 +163,18 @@ static int tmr_next(void *ctx, u32 *cycles)
         return 0;
     *cycles = best > 0xffffffffu ? 0xffffffffu : (u32)best;
     return 1;
+}
+
+/* when a flag whose interrupt is enabled next sets */
+static int tmr_next(void *ctx, u32 *cycles)
+{
+    return first_match(ctx, 1, cycles);
+}
+
+/* when a flag next sets, and the timer's event goes to the models listening */
+static int tmr_next_effect(void *ctx, u32 *cycles)
+{
+    return first_match(ctx, 0, cycles);
 }
 
 static u32 tmr_read(void *ctx, u32 off, int n)
@@ -211,6 +231,7 @@ void *pic24_tmr_create(struct sim *s, struct rf_periph *p)
         die("out of memory");
     m->s = s;
     m->p = p;
+    rf_lag(p, tmr_next_effect);
     for (int n = 1; n <= NT; n++) {
         struct t *t = &m->t[n];
         snprintf(nm, sizeof nm, "T%dCON", n);

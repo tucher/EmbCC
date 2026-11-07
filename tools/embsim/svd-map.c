@@ -39,6 +39,12 @@
 #include "svd-map.h"
 
 #define MAX_TICKERS 32
+#define NO_EFFECT (~0ull)
+/* map_tick's ticks: the models that may lag waiting, or the step's every model;
+ * or those models catching up */
+#define STEP_WAITING 1
+#define STEP_ALL 2
+#define STEP_CATCHING_UP 3
 
 struct svdmap {
     struct sim *s;
@@ -53,6 +59,11 @@ struct svdmap {
      * at each tick, so a model may start its clock while it is created */
     struct rf_periph *tk[MAX_TICKERS];
     int ntk;
+    /* the models that may lag (rf_lag) are ticked up to synced_at; due_at is
+     * the cycle the first of them next acts at, when due_known */
+    u64 synced_at, due_at;
+    int due_known;
+    int stepping;                   /* the ticks under way: STEP_* */
     int faults;                     /* bus faults reported */
     int rules;                      /* the board's RF_* */
 };
@@ -886,11 +897,61 @@ static void alias_write(struct svdmap *m, struct rf_reg *r, int kind, u32 v)
         p->ops->write(p->ctx, off, 4, (u32)w);
 }
 
+static int lags(const struct rf_periph *p)
+{
+    return p->next_effect != 0;
+}
+
+/* the running models that may lag ticked up to cycle `to`: none of them acts
+ * before its due cycle, so the order they tick in is not seen */
+static void sync_to(struct svdmap *m, u64 to)
+{
+    int was = m->stepping;
+    m->stepping = STEP_CATCHING_UP;
+    while (m->synced_at < to) {
+        u64 left = to - m->synced_at;
+        u32 c = left > 0xffffffffu ? 0xffffffffu : (u32)left;
+        struct rf_periph *late[MAX_TICKERS];
+        int n = 0;
+        m->synced_at += c;
+        for (int i = 0; i < m->ntk; i++)
+            if (lags(m->tk[i]) && m->tk[i]->ops->tick)
+                late[n++] = m->tk[i];
+        for (int i = 0; i < n; i++)
+            late[i]->ops->tick(late[i]->ctx, c);
+    }
+    m->stepping = was;
+}
+
+/* the models that may lag, current before the program or a question sees them */
+static void catch_up(struct svdmap *m)
+{
+    sync_to(m, m->s->cycles);
+}
+
+static void find_due(struct svdmap *m)
+{
+    u64 due = NO_EFFECT;
+    for (int i = 0; i < m->ntk; i++) {
+        u32 c;
+        if (lags(m->tk[i]) && m->tk[i]->next_effect(m->tk[i]->ctx, &c) && m->synced_at + c < due)
+            due = m->synced_at + c;
+    }
+    m->due_at = due;
+    m->due_known = 1;
+}
+
+void rf_lag(struct rf_periph *p, int (*next_effect)(void *ctx, u32 *cycles))
+{
+    p->next_effect = next_effect;
+}
+
 static u32 map_read(void *ctx, u32 off, int n)
 {
     struct svdmap *m = ctx;
     u32 a = m->lo + off, v = 0;
     int kind;
+    catch_up(m);
     if (atomic_alias(m, a, n, &kind))
         a &= ~0x3000u;              /* a read there is the register's */
     struct rf_reg *r = reg_at(m, a, n);
@@ -899,6 +960,8 @@ static u32 map_read(void *ctx, u32 off, int n)
         return 0;
     }
     struct rf_periph *p = r->p;
+    if (lags(p))
+        m->due_known = 0;
     if (rf_gated(p)) {
         if (p->gate_held)
             access(m, a, n, &v, 0, 0);
@@ -938,6 +1001,8 @@ static void map_write(void *ctx, u32 off, int n, u32 v)
     struct svdmap *m = ctx;
     u32 a = m->lo + off;
     int kind = 0;
+    catch_up(m);
+    m->due_known = 0;
     struct rf_reg *r = atomic_alias(m, a, n, &kind);
     if (r)
         a &= ~0x3000u;              /* the register the alias names */
@@ -978,6 +1043,13 @@ void rf_clock(struct rf_periph *p, int *running, int on)
     on = on != 0;
     if (*running == on)
         return;
+    if (lags(p)) {
+        if (m->stepping == STEP_WAITING || m->stepping == STEP_CATCHING_UP)
+            die("%s: not modelled: a model that may lag started or stopped while the models that "
+                "may lag wait or catch up", p->name);
+        catch_up(m);
+        m->due_known = 0;
+    }
     sim_clock(p->sim, running, on);
     if (on) {
         if (m->ntk == MAX_TICKERS)
@@ -996,6 +1068,8 @@ static void map_reset(void *ctx)
 {
     struct svdmap *m = ctx;
     m->ntk = 0;                     /* the models' resets stop their clocks */
+    m->synced_at = m->s->cycles;
+    m->due_known = 0;
     for (int i = 0; i < m->nreg; i++) {
         m->reg[i]->value = m->reg[i]->reset;
         m->reg[i]->once = 0;
@@ -1008,18 +1082,38 @@ static void map_reset(void *ctx)
     m->faults = 0;
 }
 
+/* the step's `cycles` have passed (s->cycles is past them): the models that may
+ * lag wait while their due cycle is still to come; at it they are brought to
+ * the step's start, and the step ticks every model in its order */
 static void map_tick(void *ctx, u32 cycles)
 {
     struct svdmap *m = ctx;
+    u64 now = m->s->cycles;
+    if (!m->due_known)
+        find_due(m);
+    if (now < m->due_at) {
+        m->stepping = STEP_WAITING;
+        for (int i = 0; i < m->ntk; i++)
+            if (!lags(m->tk[i]) && m->tk[i]->ops->tick)
+                m->tk[i]->ops->tick(m->tk[i]->ctx, cycles);
+        m->stepping = 0;
+        return;
+    }
+    sync_to(m, now - cycles);
+    m->synced_at = now;
+    m->stepping = STEP_ALL;
     for (int i = 0; i < m->ntk; i++)
         if (m->tk[i]->ops->tick)
             m->tk[i]->ops->tick(m->tk[i]->ctx, cycles);
+    m->stepping = 0;
+    m->due_known = 0;
 }
 
 static int map_next_event(void *ctx, u32 *cycles)
 {
     struct svdmap *m = ctx;
     int any = 0;
+    catch_up(m);
     for (int i = 0; i < m->ntk; i++) {
         u32 c;
         if (m->tk[i]->ops->next_event && m->tk[i]->ops->next_event(m->tk[i]->ctx, &c) &&

@@ -220,10 +220,13 @@ static void deliver(struct rec *r, int c)
 static void poll_input(struct rec *r)
 {
     struct sim *s = r->s;
-    if (!r->in || r->in_eof || !s->rx.room || !s->rx.room(s->rx.ctx))
+    if (!r->in || r->in_eof || !s->rx.room)
         return;
     int idle = s->state == END_IDLE;
+    /* the receiver's room asked only at a poll: the asking is no step's */
     if (!idle && (s->state != RUN || steps(s) - r->last_poll < RX_POLL))
+        return;
+    if (!s->rx.room(s->rx.ctx))
         return;
     r->last_poll = steps(s);
     if (!idle && !net_file_ready(r->in))
