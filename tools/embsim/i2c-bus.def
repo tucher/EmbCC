@@ -8,31 +8,51 @@
  * host got round to it, and --record keeps each exchange for --replay. A
  * line is words separated by one space, then "\n". CYCLE, AT and UNTIL are
  * the core's estimated cycles, in decimal; BUS is the part's I2C unit (1 is
- * I2C1); BYTE is two hex digits; COUNT is decimal; ACK is "ack" or "nack".
+ * I2C1); BYTE is two hex digits; COUNT is decimal; ACK is "ack" or "nack";
+ * SCL and SDA are I2C_LINE words.
  *
  * I2C_VERSION(N): the first line EmbSim sends is "hello N"; the endpoint
  * answers "ok", or the run ends.
  * I2C_ASK(NAME, words, its answers' names separated by spaces)
- * I2C_ANSWER(NAME, words) */
+ * I2C_ANSWER(NAME, words)
+ * I2C_LINE(NAME, word): a word an SCL or SDA field takes, one driver's hold
+ * on that line. */
 
-I2C_VERSION(3)
+I2C_VERSION(4)
+
+/* Each bus's lines, SCL and SDA, are pulled up outside the part, as an I2C
+ * bus's are (DS70000195G §2.0): a line is low while the part or the outside
+ * holds it low, else high. The outside holds a line low or lets it go, and
+ * until the endpoint says otherwise lets both go. The part's port may also
+ * drive a line high, as an output; the outside holding that line low ends
+ * the run, not modelled. */
+I2C_LINE(LOW, "low")
+I2C_LINE(RELEASED, "released")
+I2C_LINE(HIGH, "high")
 
 /* Before the run reaches UNTIL nothing happens outside; or another master
- * starts a write on BUS at AT: its address byte, then its data bytes; or, at
- * CYCLE, the input NAME takes VALUE as --set NAME=VALUE gives it, and
- * "undriven" leaves a pin to the part's pull-up. The run polls again at once
- * after a pin. */
+ * starts a write on BUS at AT: its address byte, then its data bytes, once
+ * both lines are high (§2.1: a transfer starts only on a bus that is not
+ * busy); or, at CYCLE, the input NAME takes VALUE as --set NAME=VALUE gives
+ * it, and "undriven" leaves a pin to the part's pull-up; or, from CYCLE, the
+ * outside holds BUS's lines as SCL and SDA say. The run polls again at once
+ * after anything but "idle". */
 I2C_ASK(HELLO, "hello VERSION", "OK")
-I2C_ASK(POLL, "poll CYCLE", "IDLE MASTER PIN")
+I2C_ASK(POLL, "poll CYCLE", "IDLE MASTER PIN LINES")
 I2C_ANSWER(IDLE, "idle UNTIL")
 I2C_ANSWER(MASTER, "master AT BUS BYTE...")
 I2C_ANSWER(PIN, "pin NAME VALUE")
+I2C_ANSWER(LINES, "lines BUS SCL SDA")
 /* how many of that write's bytes, its address byte the first, the part's
  * slave acknowledged */
 I2C_ASK(DELIVERED, "delivered CYCLE BUS COUNT", "OK")
 /* that write lost arbitration to the part's master after COUNT bytes the
  * part's slave acknowledged: it went no further */
 I2C_ASK(BEATEN, "beaten CYCLE BUS COUNT", "OK")
+
+/* the part's own hold on BUS's lines changed, as SCL and SDA say: the run
+ * polls again at once after it */
+I2C_ASK(LINES, "lines CYCLE BUS SCL SDA", "OK")
 
 /* the part's own master on BUS */
 I2C_ASK(START, "start CYCLE BUS", "OK")

@@ -38,12 +38,30 @@
  *   - I2CEN cleared resets the unit: no event under way, its status bits
  *     clear, SCLREL set. Reading I2CxRCV clears RBF; the program clears
  *     IWCOL, I2COV and BCL, and the rest of I2CxSTAT is the module's.
+ *   - The bus's lines (§2.0), on the pins FPOR's ALTI2Cx selects (ASCLx and
+ *     ASDAx when it is 0, DS70616G §29.0): open drains on lines the
+ *     endpoint's outside pulls up and may hold low. Enabled, the unit keeps
+ *     its pins, TRISx and LATx without effect on them (Register 3-1;
+ *     DS30009711C §3.6), and lets them go: its own transfers and clock
+ *     stretching are not on the pins, so PORTx reads them at what the
+ *     outside holds. Disabled, the
+ *     port drives them. The endpoint is told the part's drive on each line
+ *     as it changes. The enabled unit sees the outside's Start, SDAx falling
+ *     while SCLx is high (S set, P clear: §2.1.1), and its Stop, SDAx rising
+ *     while SCLx is high (§2.1.2); a Start of its master while SCLx is low
+ *     collides (§6.5); another master's write starts only once both lines
+ *     are high (§2.1).
  * What the part's firmwares do not use ends the run, as "not modelled": a
  * read addressed to the part (slave transmission), 10-bit addresses, a
  * general call, the IPMI mode, a Repeated Start, Stop, read or acknowledge
  * while another master contends for the bus, the master writing to the
  * part's own address, a byte written to I2CxTRN with no Start before it,
- * and the unit disabled during another master's write to it. */
+ * the unit disabled during another master's write to it, a Start of its
+ * master while SDAx is held low and SCLx is high (§6.3: its first 1 would
+ * lose), the lines changing while the part's master or another master's
+ * write is on the bus, SCLx clocking after a Start seen on the lines (an
+ * address at the pins), and the outside holding low a line the port
+ * drives high. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -95,6 +113,14 @@
 #define RECEIVED_BITS 8
 #define BRG_OFFSET 2
 #define BRG_MINIMUM 2               /* §4.3: smaller values are not supported */
+/* FPOR's ALTI2C1 and ALTI2C2 (DS70616G §29.0: FPOR<5:4>): 0 puts I2Cx on
+ * ASCLx and ASDAx; FPOR's address when the part's EDC does not give it */
+#define FPOR_ADDR 0xf8000cu
+#define ALTI2C_FIRST_BIT 4
+#define ALTI2C_UNITS 2
+#define PIN_NAME 16
+#define DRIVEN_HIGH 1
+#define NOT_DRIVEN (-1)
 /* another master's clock: IPMB's */
 #define OUTSIDE_HZ 100000u
 #define OUTSIDE_STOP_BITS 1
@@ -126,6 +152,12 @@ struct unit {
     int losing;                     /* the byte going out loses arbitration at its end */
     u8 rx;                          /* the byte coming in */
     struct outside o;
+    int pinned;                     /* its pins looked up: scl and sda, or -1 */
+    int scl, sda;
+    int scl_level, sda_level;       /* the lines' levels, as last looked at */
+    int scl_drive, sda_drive;       /* the part's drive on them, as the endpoint was told */
+    int scl_out, sda_out;           /* the outside holds them low */
+    int pin_start;                  /* a Start seen on the lines, no Stop since */
 };
 
 struct i2c {
@@ -188,6 +220,123 @@ static void clock_state(struct i2c *m)
     rf_clock(m->p, &m->running, any);
 }
 
+/* ---- the bus's lines ---------------------------------------------------- */
+
+static void pins_changed(void *ctx, u64 when);
+
+/* the unit's pins, by FPOR's ALTI2Cx, once the image is loaded */
+static void find_pins(struct unit *u)
+{
+    struct sim *s = u->m->s;
+    char scl[PIN_NAME], sda[PIN_NAME];
+    int alternate = 0;
+    if (u->pinned)
+        return;
+    u->pinned = 1;
+    if (u->k <= ALTI2C_UNITS && s->svd)
+        alternate = !(pic24_prog(s, rf_config_addr(s->svd, "FPOR", FPOR_ADDR)) >>
+                      (ALTI2C_FIRST_BIT + u->k - 1) & 1);
+    snprintf(scl, sizeof scl, "%sSCL%d", alternate ? "A" : "", u->k);
+    snprintf(sda, sizeof sda, "%sSDA%d", alternate ? "A" : "", u->k);
+    u->scl = pic24_pin(s, scl);
+    u->sda = pic24_pin(s, sda);
+    if (u->scl < 0 || u->sda < 0) {
+        u->scl = u->sda = -1;
+        return;
+    }
+    u->scl_drive = u->sda_drive = NOT_DRIVEN;
+    u->scl_level = pic24_pin_level(s, u->scl);
+    u->sda_level = pic24_pin_level(s, u->sda);
+    pic24_pin_watch(s, pins_changed, u->m);
+}
+
+static int lines_free(const struct unit *u)
+{
+    return u->scl < 0 || (u->scl_level && u->sda_level);
+}
+
+/* the part's drive on the lines, told to the endpoint as it changes */
+static void drive_changed(struct unit *u)
+{
+    struct sim *s = u->m->s;
+    int scl = pic24_pin_drive(s, u->scl), sda = pic24_pin_drive(s, u->sda);
+    if (scl == u->scl_drive && sda == u->sda_drive)
+        return;
+    u->scl_drive = scl;
+    u->sda_drive = sda;
+    if (!on_bus(u))
+        return;
+    if ((scl == DRIVEN_HIGH && u->scl_out) || (sda == DRIVEN_HIGH && u->sda_out))
+        not_modelled(u, "the outside holding low a line the port drives high");
+    i2cbus_lines(s, u->k, scl, sda);
+}
+
+static void levels_changed(struct unit *u, int scl, int sda)
+{
+    int was_scl = u->scl_level, was_sda = u->sda_level;
+    u->scl_level = scl;
+    u->sda_level = sda;
+    if (u->o.on && u->o.started)
+        not_modelled(u, "its bus's lines changing during another master's write");
+    if (!(con(u) & I2CEN))
+        return;
+    if (u->op != OP_NONE || u->active)
+        not_modelled(u, "its bus's lines changing while the part's master is on the bus");
+    if (scl && was_scl && sda != was_sda) {
+        /* §2.1.1, §2.1.2: SDAx changing while SCLx is high */
+        set_stat(u, sda ? ST_P : ST_S, sda ? ST_S : ST_P);
+        u->pin_start = !sda;
+    } else if (scl != was_scl && u->pin_start) {
+        not_modelled(u, "SCLx clocking after a Start seen on the lines (an address at the pins)");
+    }
+}
+
+static void pins_changed(void *ctx, u64 when)
+{
+    struct i2c *m = ctx;
+    (void)when;
+    for (int k = 1; k <= NU; k++) {
+        struct unit *u = &m->u[k];
+        if (!u->con || !u->pinned || u->scl < 0)
+            continue;
+        drive_changed(u);
+        int scl = pic24_pin_level(m->s, u->scl), sda = pic24_pin_level(m->s, u->sda);
+        if (scl != u->scl_level || sda != u->sda_level)
+            levels_changed(u, scl, sda);
+    }
+}
+
+/* the endpoint: the outside's hold on the lines */
+static void outside_lines(void *ctx, int scl_low, int sda_low)
+{
+    struct unit *u = ctx;
+    struct sim *s = u->m->s;
+    find_pins(u);
+    if (u->scl < 0) {
+        if (scl_low || sda_low)
+            not_modelled(u, "its bus's lines held, on pins the part has not");
+        return;
+    }
+    if ((scl_low && u->scl_drive == DRIVEN_HIGH) || (sda_low && u->sda_drive == DRIVEN_HIGH))
+        not_modelled(u, "the outside holding low a line the port drives high");
+    u->scl_out = scl_low;
+    u->sda_out = sda_low;
+    pic24_pin_bus(s, u->scl, scl_low);
+    pic24_pin_bus(s, u->sda, sda_low);
+    pic24_pins_changed(s);
+}
+
+/* Register 3-1: enabled, the unit takes its pins, an open drain each, let go */
+static void take_pins(struct unit *u, int level)
+{
+    struct sim *s = u->m->s;
+    find_pins(u);
+    if (u->scl < 0)
+        return;
+    pic24_pin_out(s, u->scl, level, s->cycles);
+    pic24_pin_out(s, u->sda, level, s->cycles);
+}
+
 /* ---- the master -------------------------------------------------------- */
 
 #define NEVER (~0ull)
@@ -218,6 +367,12 @@ static void begin(struct unit *u, int op, u32 periods)
 {
     struct sim *s = u->m->s;
     struct outside *o = &u->o;
+    if (op == OP_START && !u->scl_level && u->scl >= 0) {
+        start_collides(u);      /* §6.5: SCLx low before SDAx is driven low */
+        return;
+    }
+    if (op == OP_START && !u->sda_level && u->scl >= 0)
+        not_modelled(u, "a Start while SDAx is held low and SCLx is high (§6.3: its first 1 would lose)");
     if (o->on && o->contending && op != OP_TX)
         not_modelled(u, "a Repeated Start, Stop, read or acknowledge while another master contends for the bus (§6)");
     if (op == OP_START && o->on) {
@@ -385,6 +540,10 @@ static void outside_step(struct unit *u)
     struct outside *o = &u->o;
     struct sim *s = u->m->s;
     if (!o->started) {
+        if (!lines_free(u)) {
+            o->at = s->cycles + outside_bit(u); /* §2.1: a line is held, the bus is busy */
+            return;
+        }
         if (u->op == OP_START && !u->active) {
             o->started = o->contending = 1;     /* both Starts at once: they contend */
             o->at = NEVER;
@@ -508,8 +667,10 @@ static void reset_unit(struct unit *u)
         not_modelled(u, "the unit disabled during another master's write to it");
     u->op = OP_NONE;
     u->active = 0;
+    u->pin_start = 0;
     rf_hw(u->stat, 0);
     set_con(u, SCLREL, 0);
+    take_pins(u, NOT_DRIVEN);
 }
 
 static void i2c_write(void *ctx, u32 off, int n, u32 v)
@@ -561,6 +722,8 @@ static void i2c_write(void *ctx, u32 off, int n, u32 v)
             reset_unit(u);
         return;
     }
+    if (!(was & I2CEN))
+        take_pins(u, PIC24_PIN_RELEASED);
     u32 rose = now & ~was;
     if (u->op != OP_NONE)
         return;
@@ -576,13 +739,26 @@ static void i2c_write(void *ctx, u32 off, int n, u32 v)
         begin(u, OP_ACK, ACK_PERIODS);
 }
 
+/* A reset makes every pin an input and every unit gives its pins back: the
+ * part lets its lines go, and they are at what the outside holds. */
 static void i2c_reset(void *ctx)
 {
     struct i2c *m = ctx;
     for (int k = 1; k <= NU; k++) {
-        m->u[k].op = OP_NONE;
-        m->u[k].active = 0;
-        memset(&m->u[k].o, 0, sizeof m->u[k].o);
+        struct unit *u = &m->u[k];
+        u->op = OP_NONE;
+        u->active = 0;
+        u->pin_start = 0;
+        memset(&u->o, 0, sizeof u->o);
+        if (!u->con || !u->pinned || u->scl < 0)
+            continue;
+        u->scl_level = !u->scl_out;
+        u->sda_level = !u->sda_out;
+        if (u->scl_drive != NOT_DRIVEN || u->sda_drive != NOT_DRIVEN) {
+            u->scl_drive = u->sda_drive = NOT_DRIVEN;
+            if (on_bus(u))
+                i2cbus_lines(m->s, k, NOT_DRIVEN, NOT_DRIVEN);
+        }
     }
     m->running = 0;
 }
@@ -620,7 +796,8 @@ void *pic24e_i2c_create(struct sim *s, struct rf_periph *p)
         rf_set_acc(u->stat, 0xffff, ACC_RO);
         rf_set_acc(u->rcv, 0xffff, ACC_RO);
         rf_set_acc(u->trn, 0xffff, ACC_RW);
-        i2cbus_attach(s, k, u, inject);
+        u->scl = u->sda = -1;
+        i2cbus_attach(s, k, u, inject, outside_lines);
     }
     if (!any) {
         free(m);

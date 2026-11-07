@@ -471,11 +471,15 @@ void rec_i2c_replay(struct sim *s, const char *ask, char *answer, size_t n);
 void i2cbus_open(struct sim *s, const char *host, int port);
 /* an endpoint is on: without one, nothing outside the part is on its buses */
 int i2cbus_on(struct sim *s);
-/* the unit that drives bus `bus` (1 up), and how it takes a write another
- * master starts on it at cycle `at`; it says how many of the write's bytes
- * its slave acknowledged with i2cbus_delivered */
+/* the unit that drives bus `bus` (1 up): how it takes a write another
+ * master starts on it at cycle `at` (it says how many of the write's bytes
+ * its slave acknowledged with i2cbus_delivered), and the outside's hold on
+ * the bus's lines (1: held low); it tells the endpoint of the part's own
+ * drive on them with i2cbus_lines (each 1 high, 0 low, -1 none) */
 void i2cbus_attach(struct sim *s, int bus, void *ctx,
-                   void (*inject)(void *ctx, u64 at, const u8 *b, int n));
+                   void (*inject)(void *ctx, u64 at, const u8 *b, int n),
+                   void (*lines)(void *ctx, int scl_low, int sda_low));
+void i2cbus_lines(struct sim *s, int bus, int scl, int sda);
 void i2cbus_delivered(struct sim *s, int bus, int count);
 /* the write lost arbitration to the part's master after `count` bytes */
 void i2cbus_beaten(struct sim *s, int bus, int count);

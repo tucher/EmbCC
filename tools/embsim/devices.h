@@ -127,10 +127,20 @@ int pic24_pin_level(struct sim *s, int pin);
 int pic24_pin_of_input(struct sim *s, const char *field);
 /* a peripheral's output, from time `when` (struct sim's cycles): the PPS
  * output function fn (the data sheet's Table 11-4 numbers it) or a pin
- * of the peripheral's own at level 0 or 1, or -1 when it lets the pin go.
- * Driven, the pin is the peripheral's, whatever TRISx and LATx say */
+ * of the peripheral's own at level 0 or 1, PIC24_PIN_RELEASED when it
+ * keeps an open-drain pin and lets it go, or -1 when it gives the pin
+ * back to the port. Driven, the pin is the peripheral's, whatever TRISx
+ * and LATx say */
+#define PIC24_PIN_RELEASED 2
 void pic24_pps_out(struct sim *s, int fn, int level, u64 when);
 void pic24_pin_out(struct sim *s, int pin, int level, u64 when);
+/* the pin is a line of a bus outside the part, pulled up there, which the
+ * bus holds low (low 1) or lets go; the caller then tells the ports
+ * (pic24_pins_changed), so lines that change together change at once */
+void pic24_pin_bus(struct sim *s, int pin, int low);
+/* the part's own drive on a pin: 1 high, 0 low, -1 none (an input, an
+ * open drain let go, a peripheral's pin it lets go) */
+int pic24_pin_drive(struct sim *s, int pin);
 /* fn told when a pin may have changed level (the time it did), and the
  * ports told of a change the PPS made */
 void pic24_pin_watch(struct sim *s, void (*fn)(void *ctx, u64 when), void *ctx);

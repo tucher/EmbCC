@@ -26,13 +26,26 @@
  *     CNCON.ON a pin whose CNEN bit is set flags CHANGE_NOTICE when its
  *     level changes, either way (the part compares with the last read of
  *     PORTx: here, with the last level).
+ *   - A dsPIC33E's or PIC24E's change notification (DS70616G §11.3): a
+ *     pin whose CNENx bit is set flags the CN interrupt when its level
+ *     changes, either way, against its last level. The data sheet does
+ *     not say whether the part compares with the last sample or the last
+ *     read of PORTx; a program that reads PORTx in its handler, as the
+ *     manual's examples do, sees the same interrupts either way.
  *   - A PIC24's peripherals on its pins: an output a peripheral drives
  *     (pic24_pps_out: a PPS output function, on each RPn pin whose RPORx
  *     field selects it; pic24_pin_out: a pin of its own, an MCCP's OCMxA)
  *     is the pin's level, over TRISx and LATx, as the data sheet gives
- *     the peripherals priority; and the peripherals that watch their
+ *     the peripherals priority; one a peripheral drives open-drain and
+ *     lets go (PIC24_PIN_RELEASED: an I2C unit's line) is still the
+ *     peripheral's, TRISx and LATx without effect (DS30009711C §3.6), and
+ *     reads as an input does (§3.3). The peripherals that watch their
  *     inputs (an input capture) are told when a pin may have changed,
  *     with the time it did. The pins are the EDC's, by name.
+ *   - A bus outside the part (pic24_pin_bus: an I2C bus's lines): the pin
+ *     is pulled up outside, and reads 0 while the bus holds it low or the
+ *     part drives it low, else 1 (DS70000195G §2.0: open drains on a
+ *     wired-AND line, with pull-up resistors).
  * PORTx's value shows in --trace-periph when a read changes it. Not
  * modelled: a PIC32's change notification interrupts (CNx), the slew
  * rate. */
@@ -40,6 +53,7 @@
 #include <string.h>
 
 #include "devices.h"
+#include "pic24.h"
 #include "pic32.h"
 #include "svd-map.h"
 
@@ -48,9 +62,11 @@
 struct port {
     struct rf_reg *ansel, *tris, *port, *lat, *odc, *cnpu;
     struct rf_reg *iocp, *iocn, *iocf;      /* a PIC24's interrupt-on-change */
+    struct rf_reg *cnen;            /* a dsPIC33E's or PIC24E's change notification */
     u32 pins;                       /* the pins the port has */
     u32 high, low;                  /* driven high and low, as the board was told */
     u32 level;                      /* the pins' levels, as last looked at */
+    u32 bus, bus_low;               /* lines of a bus outside, and those it holds low */
 };
 
 struct gpio {
@@ -63,6 +79,7 @@ struct gpio {
     struct rf_reg *ad1pcfg, *cncon, *cnen, *cnpue;
     signed char cn[NPORTS][32];
     int cn_irq;
+    int port_cn_irq;                        /* a dsPIC33E's or PIC24E's CN */
     /* a PIC24's peripherals on its pins */
     struct rf_reg *rpor[32], *rpinr[64];    /* the PPS's */
     signed char rp_of[NPORTS][32];          /* a pin's RPn, or -1 */
@@ -88,7 +105,7 @@ static int periph_level(const struct gpio *g, int i, int b)
 }
 
 /* the bits driven high (outputs at 1, not an open drain let go, or a
- * peripheral's at 1) and driven low (outputs at 0) */
+ * peripheral's at 1) and driven low (outputs at 0, or a peripheral's) */
 static u32 drives(const struct gpio *g, int i, u32 *low)
 {
     const struct port *q = &g->pt[i];
@@ -100,8 +117,9 @@ static u32 drives(const struct gpio *g, int i, u32 *low)
     for (int b = 0; g->driven && b < 32; b++) {
         int pl = (q->pins >> b & 1) ? periph_level(g, i, b) : -1;
         if (pl >= 0) {
-            hi = (hi & ~(1u << b)) | (u32)pl << b;
-            *low = (*low & ~(1u << b)) | (u32)!pl << b;
+            u32 m = 1u << b;
+            hi = (hi & ~m) | (pl == 1 ? m : 0);
+            *low = (*low & ~m) | (pl == 0 ? m : 0);
         }
     }
     return hi;
@@ -132,10 +150,13 @@ static u32 pins_read(struct gpio *g, int i)
         int level = 0, pl;
         if (!(q->pins & m) || (an & m))
             continue;
-        if ((pl = periph_level(g, i, b)) >= 0) {
+        pl = periph_level(g, i, b);
+        if (pl == 0 || pl == 1) {
             level = pl;
-        } else if (!(tris & m) && !((od & m) && (lat & m))) {
+        } else if (pl < 0 && !(tris & m) && !((od & m) && (lat & m))) {
             level = (lat & m) != 0;
+        } else if (q->bus & m) {
+            level = !(q->bus_low & m);
         } else if (!(io->pin_in && io->pin_in(io->ctx, i, b, &level))) {
             level = (up & m) != 0;
         }
@@ -169,12 +190,14 @@ static void ioc_check(struct gpio *g)
     int cn_on = g->cncon && (g->cncon->value >> 15 & 1);
     for (int i = 0; i < NPORTS; i++) {
         struct port *q = &g->pt[i];
-        if (!q->port || (!q->iocf && !g->cncon))
+        if (!q->port || (!q->iocf && !g->cncon && !q->cnen))
             continue;
         u32 lv = pins_read(g, i), was = q->level;
         q->level = lv;
         if (cn_on && ((lv ^ was) & cn_bits(g, g->cnen, i)) && g->cn_irq >= 0)
             pic32_irq(g->s, g->cn_irq);
+        if (q->cnen && ((lv ^ was) & (u32)q->cnen->value) && g->port_cn_irq >= 0)
+            pic24_irq(g->s, g->port_cn_irq);
         if (!on || !q->iocf)
             continue;
         u32 ch = (lv & ~was & (q->iocp ? (u32)q->iocp->value : 0)) |
@@ -293,6 +316,8 @@ void *pic32_gpio_create(struct sim *s, struct rf_periph *p)
         REG(iocp, "IOCP");
         REG(iocn, "IOCN");
         REG(iocf, "IOCF");
+        if (pic24_is(s->cpu))
+            REG(cnen, "CNEN");
 #undef REG
         if (!q->port || !q->tris || !q->lat) {
             q->port = 0;
@@ -312,6 +337,7 @@ void *pic32_gpio_create(struct sim *s, struct rf_periph *p)
     g->padcon = pad ? rf_reg(pad, "PADCON") : 0;
     g->iocstat = pad ? rf_reg(pad, "IOCSTAT") : 0;
     g->ioc_irq = g->padcon ? pic24_irq_named(s, "IOC") : -1;
+    g->port_cn_irq = pic24_is(s->cpu) ? pic24_irq_named(s, "CN") : -1;
     /* a PIC32MX's AD1PCFG and change notices */
     struct rf_periph *adc = s->svd ? rf_periph(s->svd, "ADC10") : 0;
     g->ad1pcfg = adc && !g->pt[1].ansel ? rf_reg(adc, "AD1PCFG") : 0;
@@ -393,7 +419,7 @@ int pic24_pin_of_input(struct sim *s, const char *field)
 
 static void drive(struct gpio *g, signed char *at, int level, u64 when)
 {
-    level = level < 0 ? -1 : level != 0;
+    level = level < 0 ? -1 : level == PIC24_PIN_RELEASED ? level : level != 0;
     if (*at == level)
         return;
     *at = (signed char)level;
@@ -414,6 +440,26 @@ void pic24_pin_out(struct sim *s, int pin, int level, u64 when)
     struct gpio *g = gpio_of(s);
     if (g && pin >= 0 && pin / 32 < NPORTS)
         drive(g, &g->own[pin / 32][pin % 32], level, when);
+}
+
+void pic24_pin_bus(struct sim *s, int pin, int low)
+{
+    struct gpio *g = gpio_of(s);
+    if (!g || pin < 0 || pin / 32 >= NPORTS || !g->pt[pin / 32].port)
+        die("a bus line on pin %d, which the part's ports have not", pin);
+    struct port *q = &g->pt[pin / 32];
+    u32 m = 1u << (pin % 32);
+    q->bus |= m;
+    q->bus_low = low ? q->bus_low | m : q->bus_low & ~m;
+}
+
+int pic24_pin_drive(struct sim *s, int pin)
+{
+    struct gpio *g = gpio_of(s);
+    if (!g || pin < 0 || pin / 32 >= NPORTS || !g->pt[pin / 32].port)
+        return -1;
+    u32 low, high = drives(g, pin / 32, &low), m = 1u << (pin % 32);
+    return high & m ? 1 : low & m ? 0 : -1;
 }
 
 void pic24_pin_watch(struct sim *s, void (*fn)(void *ctx, u64 when), void *ctx)

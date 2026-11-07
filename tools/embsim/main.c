@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "analysis.h"
+#include "devices.h"
 #include "disasm.h"
 #include "image.h"
 #include "sim.h"
@@ -123,7 +124,8 @@ static struct sim sim;
  * pins and an input reads its pull-up (CNPUx), else 0. --set RD5=low drives
  * one as a board's input would: R, the port's letter (no I), the bit, and
  * low, high, 0 or 1; --i2c-bus's endpoint sets one while the run goes, and
- * "undriven" stops driving it. */
+ * "undriven" stops driving it. A change is the pins' (pic24_pins_changed):
+ * the change notification and the models watching the pins see it. */
 #define PART_PINS 16
 static struct { int port, bit, level; } part_pin[PART_PINS];
 static int part_npin;
@@ -159,16 +161,17 @@ static int part_pin_set(void *ctx, const char *name, const char *value)
     if (level == PIN_UNDRIVEN) {
         if (i < part_npin)
             part_pin[i] = part_pin[--part_npin];
-        return 0;
+    } else {
+        if (i == part_npin) {
+            if (part_npin == PART_PINS)
+                return -1;
+            part_npin++;
+        }
+        part_pin[i].port = port;
+        part_pin[i].bit = (int)bit;
+        part_pin[i].level = level;
     }
-    if (i == part_npin) {
-        if (part_npin == PART_PINS)
-            return -1;
-        part_npin++;
-    }
-    part_pin[i].port = port;
-    part_pin[i].bit = (int)bit;
-    part_pin[i].level = level;
+    pic24_pins_changed(&sim);
     return 0;
 }
 

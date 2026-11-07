@@ -5,15 +5,21 @@
  *
  *   - Polled after every instruction once the core reaches the cycle the
  *     endpoint's last "idle" named: nothing outside happens before it, so
- *     the run asks again only then, when its own master has started
- *     (another master may start with it), or when it has stopped (a slave
- *     may answer what it was sent).
+ *     the run asks again only then, at once after anything the endpoint
+ *     answered but "idle" (a write may wait for a line the endpoint is yet
+ *     to let go), when its own master has started (another master may start
+ *     with it), or when it has stopped (a slave may answer what it was
+ *     sent).
  *   - A write another master starts goes to the unit that drives that bus
  *     (i2cbus_attach), which clocks it into its slave and says how far the
  *     slave acknowledged it (i2cbus_delivered). A bus no unit drives ends
  *     the run: nothing in the part could take the write.
  *   - An input the endpoint sets goes to the board as --set's would; one the
- *     board has not got ends the run. */
+ *     board has not got ends the run.
+ *   - The lines of a bus: the outside's hold on them goes to the unit that
+ *     drives that bus (i2cbus_attach), the outside letting both go when the
+ *     endpoint opens; the unit tells the endpoint of its own
+ *     (i2cbus_lines). */
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +30,23 @@
 #define I2C_VERSION(v) enum { I2C_PROTOCOL_VERSION = (v) };
 #define I2C_ASK(n, words, answers)
 #define I2C_ANSWER(n, words)
+#define I2C_LINE(n, word)
 #include "i2c-bus.def"
+#undef I2C_VERSION
+#define I2C_VERSION(v)
+#undef I2C_LINE
+#define I2C_LINE(n, word) LINE_##n,
+enum {
+#include "i2c-bus.def"
+    LINE_WORDS
+};
+#undef I2C_LINE
+#define I2C_LINE(n, word) word,
+static const char *const line_words[] = {
+#include "i2c-bus.def"
+};
+#undef I2C_LINE
+#define I2C_LINE(n, word)
 #undef I2C_VERSION
 #undef I2C_ASK
 #undef I2C_ANSWER
@@ -71,15 +93,16 @@ static const char *const answer_names[] = {
 #undef I2C_VERSION
 #undef I2C_ASK
 #undef I2C_ANSWER
+#undef I2C_LINE
 
 #define I2C_UNITS 4
 /* an ask or an answer: a master's write of up to 255 bytes and its words */
 #define LINE_MAX 1024
-#define NO_POLL UINT64_MAX
 
 struct unit {
     void *ctx;
     void (*inject)(void *ctx, u64 at, const u8 *b, int n);
+    void (*lines)(void *ctx, int scl_low, int sda_low);
 };
 
 struct i2cbus {
@@ -181,6 +204,21 @@ static void expect_ok(struct i2cbus *b, int what, const char *fmt, ...)
     ask(b, what, answer, "%s", args);
 }
 
+/* the outside's SCL or SDA field: 1 for a hold low, 0 for a line let go */
+static int parse_line(const char *word, size_t n, const char *line)
+{
+    for (int k = 0; k < LINE_WORDS; k++)
+        if (k != LINE_HIGH && strlen(line_words[k]) == n && !strncmp(word, line_words[k], n))
+            return k == LINE_LOW;
+    die("--i2c-bus: a bad line in '%s': the outside holds a line low or lets it go", line);
+}
+
+/* the part's drive on a line (pic24_pin_drive's: 1 high, 0 low, -1 none) as its word */
+static const char *drive_word(int drive)
+{
+    return line_words[drive > 0 ? LINE_HIGH : drive == 0 ? LINE_LOW : LINE_RELEASED];
+}
+
 static u64 parse_u64(const char *p, const char *line)
 {
     char *e;
@@ -222,6 +260,20 @@ static void poll_tick(void *ctx, u32 cycles)
         b->next_poll = s->cycles;
         return;
     }
+    if (kind == ANSWER_LINES) {
+        char *e;
+        long bus = strtol(p, &e, 10);
+        const char *scl = e + (*e == ' '), *sda = strchr(scl, ' ');
+        if (e == p || *e != ' ' || !sda || strchr(sda + 1, ' '))
+            die("--i2c-bus: bad lines '%s'", answer);
+        if (bus < 1 || bus > I2C_UNITS || !b->unit[bus].lines)
+            die("--i2c-bus: the outside holds the lines of bus %ld, which no I2C unit of "
+                "the part drives", bus);
+        b->unit[bus].lines(b->unit[bus].ctx, parse_line(scl, (size_t)(sda - scl), answer),
+                           parse_line(sda + 1, strlen(sda + 1), answer));
+        b->next_poll = s->cycles;
+        return;
+    }
     char *e;
     u64 at = strtoull(p, &e, 10);
     long bus = strtol(e, &e, 10);
@@ -240,7 +292,7 @@ static void poll_tick(void *ctx, u32 cycles)
     if (bus < 1 || bus > I2C_UNITS || !b->unit[bus].inject)
         die("--i2c-bus: another master writes on bus %ld, which no I2C unit of "
             "the part drives", bus);
-    b->next_poll = NO_POLL;
+    b->next_poll = s->cycles;
     b->unit[bus].inject(b->unit[bus].ctx, at, bytes, n);
 }
 
@@ -264,6 +316,14 @@ int i2cbus_on(struct sim *s)
     return s->i2c && s->i2c->on;
 }
 
+/* the outside lets every bus's lines go */
+static void released(struct i2cbus *b)
+{
+    for (int bus = 1; bus <= I2C_UNITS; bus++)
+        if (b->unit[bus].lines)
+            b->unit[bus].lines(b->unit[bus].ctx, 0, 0);
+}
+
 void i2cbus_open(struct sim *s, const char *host, int port)
 {
     struct i2cbus *b = get(s);
@@ -274,8 +334,10 @@ void i2cbus_open(struct sim *s, const char *host, int port)
         die("too many devices that keep time");
     s->tick_fn[s->ntick_fn] = poll_tick;
     s->tick_ctx[s->ntick_fn++] = b;
-    if (s->rec && rec_replaying(s))
+    if (s->rec && rec_replaying(s)) {
+        released(b);
         return;
+    }
     int listener = net_listen(host, port);
     if (listener < 0)
         die("--i2c-bus: cannot listen on port %d", port);
@@ -293,16 +355,27 @@ void i2cbus_open(struct sim *s, const char *host, int port)
     if (answer_kind(answer) != ANSWER_OK)
         die("--i2c-bus: the endpoint answered '%s' to protocol version %d", answer,
             I2C_PROTOCOL_VERSION);
+    released(b);
 }
 
 void i2cbus_attach(struct sim *s, int bus, void *ctx,
-                   void (*inject)(void *ctx, u64 at, const u8 *b, int n))
+                   void (*inject)(void *ctx, u64 at, const u8 *b, int n),
+                   void (*lines)(void *ctx, int scl_low, int sda_low))
 {
     struct i2cbus *b = get(s);
     if (bus < 1 || bus > I2C_UNITS)
         die("I2C bus %d: the endpoint knows buses 1 to %d", bus, I2C_UNITS);
     b->unit[bus].ctx = ctx;
     b->unit[bus].inject = inject;
+    b->unit[bus].lines = lines;
+}
+
+void i2cbus_lines(struct sim *s, int bus, int scl, int sda)
+{
+    struct i2cbus *b = s->i2c;
+    expect_ok(b, ASK_LINES, "%llu %d %s %s", (unsigned long long)s->cycles, bus,
+              drive_word(scl), drive_word(sda));
+    b->next_poll = s->cycles;
 }
 
 void i2cbus_delivered(struct sim *s, int bus, int count)
