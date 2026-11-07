@@ -391,6 +391,13 @@ struct sim {
     double (*now_ns)(struct sim *s);
     /* the I2C bus endpoint (i2c-bus.c), or 0 */
     struct i2cbus *i2c;
+    /* where the UART's bytes go: 0 for stdout, else a part's own console */
+    FILE *out;
+    /* its number among the run's parts (--part), 1 for the first */
+    int part;
+    /* another part may change what this one waits on: a loop nothing in
+     * the part can interrupt goes on, and does not end the run */
+    int never_idle;
 };
 
 /* build the board with its core (`model`, or 0 for the board's own),
@@ -412,6 +419,9 @@ void sim_part_reset(struct sim *s);
 void sim_step(struct sim *s);
 /* run until the end */
 void sim_run(struct sim *s);
+/* several parts, stepped together (sim_run_parts in run.c): the part that
+ * ended the run */
+struct sim *sim_run_parts(struct sim *const *part, int n);
 /* end the run: state, and the reason --stats prints */
 void sim_end(struct sim *s, int state, const char *fmt, ...);
 /* a byte of the program's output */
@@ -471,14 +481,22 @@ void rec_i2c_replay(struct sim *s, const char *ask, char *answer, size_t n);
 void i2cbus_open(struct sim *s, const char *host, int port);
 /* an endpoint is on: without one, nothing outside the part is on its buses */
 int i2cbus_on(struct sim *s);
-/* the unit that drives bus `bus` (1 up): how it takes a write another
- * master starts on it at cycle `at` (it says how many of the write's bytes
- * its slave acknowledged with i2cbus_delivered), and the outside's hold on
- * the bus's lines (1: held low); it tells the endpoint of the part's own
- * drive on them with i2cbus_lines (each 1 high, 0 low, -1 none) */
-void i2cbus_attach(struct sim *s, int bus, void *ctx,
-                   void (*inject)(void *ctx, u64 at, const u8 *b, int n),
-                   void (*lines)(void *ctx, int scl_low, int sda_low));
+/* what an I2C unit takes from outside the part: a write another master
+ * starts on its bus at cycle `at` (it says how many of the write's bytes
+ * its slave acknowledged with i2cbus_delivered), the outside's hold on the
+ * bus's lines (1: held low), and another part's unit joined to its bus
+ * (--wire: the same model's) */
+struct i2c_unit_ops {
+    void (*inject)(void *ctx, u64 at, const u8 *b, int n);
+    void (*lines)(void *ctx, int scl_low, int sda_low);
+    void (*join)(void *ctx, void *other);
+};
+/* the unit that drives bus `bus` (1 up); it tells the endpoint of the
+ * part's own drive on the bus's lines with i2cbus_lines (each 1 high, 0
+ * low, -1 none) */
+void i2cbus_attach(struct sim *s, int bus, void *ctx, const struct i2c_unit_ops *ops);
+/* --wire: unit ka of part a and unit kb of part b on one bus */
+void i2cbus_wire(struct sim *a, int ka, struct sim *b, int kb);
 void i2cbus_lines(struct sim *s, int bus, int scl, int sda);
 void i2cbus_delivered(struct sim *s, int bus, int count);
 /* the write lost arbitration to the part's master after `count` bytes */

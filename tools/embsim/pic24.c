@@ -1119,6 +1119,9 @@ static int pwrsav(void)
         if (pr)
             break;                              /* it wakes; taken if above ipl */
         if (!sim_next_event(s, &left)) {
+            if (s->never_idle)
+                die("part %d: not modelled: asleep (PWRSAV) while the run's other parts go on",
+                    s->part);
             sim_end(s, END_IDLE, "asleep (PWRSAV) with nothing to wake it, "
                     "at 0x%06x", (unsigned)ps->pc);
             return 0;

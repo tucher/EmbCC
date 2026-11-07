@@ -31,6 +31,14 @@ int net_file_ready(FILE *f)
     return net_ready(fileno(f), 0);
 }
 
+FILE *net_file(int fd, const char *mode)
+{
+    FILE *f = fdopen(fd, mode);
+    if (f)
+        setvbuf(f, 0, _IONBF, 0);
+    return f;
+}
+
 int net_listen(const char *host, int port)
 {
     struct addrinfo hints, *res, *a;

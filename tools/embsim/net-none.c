@@ -59,3 +59,10 @@ int net_file_ready(FILE *f)
     (void)f;
     return 1;
 }
+
+FILE *net_file(int fd, const char *mode)
+{
+    (void)fd;
+    (void)mode;
+    return 0;
+}

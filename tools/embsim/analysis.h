@@ -185,6 +185,7 @@ void rec_check_image(const char *path, const struct rec_machine *m);
 /* the events before the first step; after each step; an exception's
  * entry; and the end */
 void rec_start(struct sim *s);
+void rec_input_fd(struct sim *s, int fd);
 void rec_step(struct sim *s);
 void rec_exc(struct sim *s, u32 n);
 void rec_finish(struct sim *s);

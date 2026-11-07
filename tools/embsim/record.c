@@ -199,6 +199,16 @@ void rec_input(struct sim *s, const char *path)
     s->rx_on = 1;
 }
 
+/* a part's console (--part's --uart): its input is the connection's */
+void rec_input_fd(struct sim *s, int fd)
+{
+    struct rec *r = s->rec;
+    r->in = net_file(fd, "rb");
+    if (!r->in)
+        die("part %d: cannot read its UART's connection", s->part);
+    s->rx_on = 1;
+}
+
 /* a byte to the receiver, recorded */
 static void deliver(struct rec *r, int c)
 {

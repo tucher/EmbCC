@@ -25,6 +25,7 @@
 #include "devices.h"
 #include "disasm.h"
 #include "image.h"
+#include "net.h"
 #include "sim.h"
 #include "pic24.h"
 #include "svd-map.h"
@@ -77,7 +78,8 @@ static void usage(void)
           "              [--stack-su FILE.su]... [--stack-embrt FILE.json] [FILE.su...]\n"
           "              [--fault-report[=FILE]] [--disassemble[=FILE]]\n"
           "              [--input FILE|-] [--record FILE] [--i2c-bus [HOST:]PORT]\n"
-          "              [--reset-runs-on]\n"
+          "              [--reset-runs-on] [--part IMAGE --uart [HOST:]PORT]...\n"
+          "              [--wire PART.UNIT=PART.UNIT]...\n"
           "              [--dfp DIR] [--set NAME=VALUE]...\n"
           "       embsim [IMAGE.elf] --replay FILE [--count FILE] [--stats] ...\n"
           "       embsim --svd FILE.svd --svd-map\n"
@@ -127,6 +129,8 @@ static struct sim sim;
  * "undriven" stops driving it. A change is the pins' (pic24_pins_changed):
  * the change notification and the models watching the pins see it. */
 #define PART_PINS 16
+/* the run's parts: the first, and those --part adds */
+#define MAX_PARTS 4
 static struct { int port, bit, level; } part_pin[PART_PINS];
 static int part_npin;
 
@@ -188,6 +192,10 @@ int main(int argc, char **argv)
     const char *input = 0, *record = 0, *replay = 0;
     const char **su = calloc((size_t)argc, sizeof *su);
     const char **sets = calloc((size_t)argc, sizeof *sets);
+    const char *part_image[MAX_PARTS] = { 0 }, *part_uart[MAX_PARTS] = { 0 };
+    int nparts = 1;
+    const char **wires = calloc((size_t)argc, sizeof *wires);
+    int nwire = 0;
     int nsu = 0, nset = 0;
     u32 ram_size = 0;
     u64 max_insns = 0;
@@ -226,6 +234,17 @@ int main(int argc, char **argv)
             i2c_bus = argv[++i];
         else if (!strcmp(a, "--reset-runs-on"))
             reset_runs_on = 1;
+        else if (!strcmp(a, "--part") && more) {
+            if (nparts == MAX_PARTS)
+                die("--part: a run has at most %d parts", MAX_PARTS);
+            part_image[nparts++] = argv[++i];
+        } else if (!strcmp(a, "--wire") && more) {
+            wires[nwire++] = argv[++i];
+        } else if (!strcmp(a, "--uart") && more) {
+            if (nparts == 1 || part_uart[nparts - 1])
+                die("--uart names the UART of the --part before it");
+            part_uart[nparts - 1] = argv[++i];
+        }
         else if (!strcmp(a, "--gdb-wait"))
             gdb_wait = 1;
         else if (!strcmp(a, "--set") && more)
@@ -377,6 +396,11 @@ int main(int argc, char **argv)
     }
     if (!image)
         usage();
+    for (int p = 1; p < nparts; p++)
+        if (!part_uart[p])
+            die("--part %s: its UART needs a port (--uart [HOST:]PORT)", part_image[p]);
+    if (nparts > 1 && (record || replay || gdb || strcmp(bd->core, "pic24")))
+        die("--part: a PIC24 or dsPIC33E part's run, not with --record, --replay or --gdb");
     char host[256], i2c_host[256];
     int port = 0, i2c_port = 0;
     if (gdb)
@@ -495,14 +519,67 @@ int main(int argc, char **argv)
             rec_start(s);
     }
 
+    /* the other parts: each listens for its UART before the endpoint is
+     * accepted, so a harness that has had the endpoint's hello reaches them */
+    struct sim *parts[MAX_PARTS] = { s };
+    int uart_listener[MAX_PARTS];
+    s->part = 1;
+    s->never_idle = nparts > 1;
+    for (int p = 1; p < nparts; p++) {
+        struct sim *q = calloc(1, sizeof *q);
+        char uart_host[256];
+        if (!q)
+            die("out of memory");
+        q->part = p + 1;
+        q->never_idle = 1;
+        sim_init(q, bd, cpu, svd);
+        q->max_insns = max_insns;
+        q->semihosting = semihosting;
+        q->reset_runs_on = reset_runs_on;
+        sim_load(q, ram_size, part_image[p]);
+        an_create(q, 0);
+        rec_create(q);
+        int uart_port = host_port("--uart", part_uart[p], uart_host, sizeof uart_host);
+        uart_listener[p] = net_listen(uart_host[0] ? uart_host : 0, uart_port);
+        if (uart_listener[p] < 0)
+            die("part %d: cannot listen for its UART on port %d", q->part, uart_port);
+        parts[p] = q;
+    }
+    /* --wire P.U=Q.V: unit U of part P and unit V of part Q on one bus */
+    for (int w = 0; w < nwire; w++) {
+        int pa, ua, pb, ub;
+        char end;
+        if (sscanf(wires[w], "%d.%d=%d.%d%c", &pa, &ua, &pb, &ub, &end) != 4 ||
+            pa < 1 || pa > nparts || pb < 1 || pb > nparts || pa == pb)
+            die("--wire %s: give PART.UNIT=PART.UNIT, two of the run's %d parts", wires[w], nparts);
+        i2cbus_wire(parts[pa - 1], ua, parts[pb - 1], ub);
+    }
+
     if (i2c_bus)
         i2cbus_open(s, i2c_host[0] ? i2c_host : 0, i2c_port);
     else if (rp && rm.i2c_bus)
         i2cbus_open(s, 0, 0);
+    for (int p = 1; p < nparts; p++) {
+        fprintf(stderr, "embsim: part %d: waiting for its UART on %s\n", p + 1, part_uart[p]);
+        int fd = net_accept(uart_listener[p], -1);
+        net_unlisten(uart_listener[p]);
+        if (fd < 0)
+            die("part %d: no connection to its UART", p + 1);
+        rec_input_fd(parts[p], fd);
+        if (!(parts[p]->out = net_file(fd, "wb")))
+            die("part %d: cannot write its UART's connection", p + 1);
+    }
+    struct sim *ended = s;
     if (gdb)
         gdb_serve(s, host[0] ? host : 0, port, gdb_wait);
+    else if (nparts > 1)
+        ended = sim_run_parts(parts, nparts);
     else
         sim_run(s);
+    if (ended != s)
+        fprintf(stderr, "embsim: part %d ended the run: %s; %llu instructions, %llu cycles (est.)\n",
+                ended->part, ended->end_why, (unsigned long long)ended->insns,
+                (unsigned long long)ended->cycles);
     if (s->io.end)
         s->io.end(s->io.ctx);
     trace_report(s, count_path, stats || verbose);
@@ -510,8 +587,8 @@ int main(int argc, char **argv)
         rec_finish(s);
     if (s->an)
         an_finish(s);
-    switch (s->state) {
-    case END_EXIT: return s->exit_status;
+    switch (ended->state) {
+    case END_EXIT: return ended->exit_status;
     case END_LOCKUP: return 3;
     case END_BUDGET: return 4;
     default: return 0;

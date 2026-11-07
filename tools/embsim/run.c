@@ -31,6 +31,8 @@ void die(const char *fmt, ...)
 void sim_end(struct sim *s, int state, const char *fmt, ...)
 {
     va_list ap;
+    if (state == END_IDLE && s->never_idle)
+        return;
     s->state = state;
     va_start(ap, fmt);
     vsnprintf(s->end_why, sizeof s->end_why, fmt, ap);
@@ -39,7 +41,7 @@ void sim_end(struct sim *s, int state, const char *fmt, ...)
 
 void sim_out(struct sim *s, int c)
 {
-    putchar(c);
+    putc(c, s->out ? s->out : stdout);
     if (s->rec)
         rec_out(s, c);
     if (s->until) {
@@ -230,6 +232,23 @@ void sim_step(struct sim *s)
     if (s->max_insns && s->insns >= s->max_insns && s->state == RUN)
         sim_end(s, END_BUDGET, "--max-insns: %llu instructions run",
                 (unsigned long long)s->insns);
+}
+
+/* Several parts in one run: each step goes to the part furthest behind in
+ * cycles, so the parts stay within an instruction of each other; the run
+ * ends when one of them ends. */
+struct sim *sim_run_parts(struct sim *const *part, int n)
+{
+    for (;;) {
+        struct sim *next = 0;
+        for (int i = 0; i < n; i++) {
+            if (part[i]->state != RUN)
+                return part[i];
+            if (!next || part[i]->cycles < next->cycles)
+                next = part[i];
+        }
+        sim_step(next);
+    }
 }
 
 void sim_run(struct sim *s)

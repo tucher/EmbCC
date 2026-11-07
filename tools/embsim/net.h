@@ -28,5 +28,8 @@ void net_close(int fd);
 /* 1 when the host file `f` (the UART's --input) has a byte to read now,
  * without waiting; a host that cannot tell says 1, and the read waits */
 int net_file_ready(FILE *f);
+/* A connection as a stdio stream (mode "rb" or "wb"), unbuffered: a part's
+ * UART (--part's --uart). 0 when the host cannot. */
+FILE *net_file(int fd, const char *mode);
 
 #endif

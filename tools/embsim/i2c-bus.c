@@ -101,8 +101,7 @@ static const char *const answer_names[] = {
 
 struct unit {
     void *ctx;
-    void (*inject)(void *ctx, u64 at, const u8 *b, int n);
-    void (*lines)(void *ctx, int scl_low, int sda_low);
+    const struct i2c_unit_ops *ops;
 };
 
 struct i2cbus {
@@ -266,10 +265,10 @@ static void poll_tick(void *ctx, u32 cycles)
         const char *scl = e + (*e == ' '), *sda = strchr(scl, ' ');
         if (e == p || *e != ' ' || !sda || strchr(sda + 1, ' '))
             die("--i2c-bus: bad lines '%s'", answer);
-        if (bus < 1 || bus > I2C_UNITS || !b->unit[bus].lines)
+        if (bus < 1 || bus > I2C_UNITS || !b->unit[bus].ops)
             die("--i2c-bus: the outside holds the lines of bus %ld, which no I2C unit of "
                 "the part drives", bus);
-        b->unit[bus].lines(b->unit[bus].ctx, parse_line(scl, (size_t)(sda - scl), answer),
+        b->unit[bus].ops->lines(b->unit[bus].ctx, parse_line(scl, (size_t)(sda - scl), answer),
                            parse_line(sda + 1, strlen(sda + 1), answer));
         b->next_poll = s->cycles;
         return;
@@ -289,11 +288,11 @@ static void poll_tick(void *ctx, u32 cycles)
     if (*e || n == 0 || at < s->cycles)
         die("--i2c-bus: a bad master's write '%s' at cycle %llu", answer,
             (unsigned long long)s->cycles);
-    if (bus < 1 || bus > I2C_UNITS || !b->unit[bus].inject)
+    if (bus < 1 || bus > I2C_UNITS || !b->unit[bus].ops)
         die("--i2c-bus: another master writes on bus %ld, which no I2C unit of "
             "the part drives", bus);
     b->next_poll = s->cycles;
-    b->unit[bus].inject(b->unit[bus].ctx, at, bytes, n);
+    b->unit[bus].ops->inject(b->unit[bus].ctx, at, bytes, n);
 }
 
 /* ---- the part's side ------------------------------------------------------ */
@@ -320,8 +319,8 @@ int i2cbus_on(struct sim *s)
 static void released(struct i2cbus *b)
 {
     for (int bus = 1; bus <= I2C_UNITS; bus++)
-        if (b->unit[bus].lines)
-            b->unit[bus].lines(b->unit[bus].ctx, 0, 0);
+        if (b->unit[bus].ops)
+            b->unit[bus].ops->lines(b->unit[bus].ctx, 0, 0);
 }
 
 void i2cbus_open(struct sim *s, const char *host, int port)
@@ -358,16 +357,30 @@ void i2cbus_open(struct sim *s, const char *host, int port)
     released(b);
 }
 
-void i2cbus_attach(struct sim *s, int bus, void *ctx,
-                   void (*inject)(void *ctx, u64 at, const u8 *b, int n),
-                   void (*lines)(void *ctx, int scl_low, int sda_low))
+void i2cbus_attach(struct sim *s, int bus, void *ctx, const struct i2c_unit_ops *ops)
 {
     struct i2cbus *b = get(s);
     if (bus < 1 || bus > I2C_UNITS)
         die("I2C bus %d: the endpoint knows buses 1 to %d", bus, I2C_UNITS);
     b->unit[bus].ctx = ctx;
-    b->unit[bus].inject = inject;
-    b->unit[bus].lines = lines;
+    b->unit[bus].ops = ops;
+}
+
+static struct unit *wired_unit(struct sim *s, int k)
+{
+    struct i2cbus *b = get(s);
+    if (k < 1 || k > I2C_UNITS || !b->unit[k].ops)
+        die("--wire: part %d has no I2C%d", s->part, k);
+    return &b->unit[k];
+}
+
+void i2cbus_wire(struct sim *a, int ka, struct sim *b, int kb)
+{
+    struct unit *x = wired_unit(a, ka), *y = wired_unit(b, kb);
+    if (x == y || x->ops != y->ops)
+        die("--wire: part %d's I2C%d and part %d's I2C%d are not two units of one model",
+            a->part, ka, b->part, kb);
+    x->ops->join(x->ctx, y->ctx);
 }
 
 void i2cbus_lines(struct sim *s, int bus, int scl, int sda)
