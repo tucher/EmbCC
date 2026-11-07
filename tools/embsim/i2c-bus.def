@@ -15,7 +15,7 @@
  * I2C_ASK(NAME, words, its answers' names separated by spaces)
  * I2C_ANSWER(NAME, words) */
 
-I2C_VERSION(2)
+I2C_VERSION(3)
 
 /* Before the run reaches UNTIL nothing happens outside; or another master
  * starts a write on BUS at AT: its address byte, then its data bytes; or, at
@@ -30,6 +30,9 @@ I2C_ANSWER(PIN, "pin NAME VALUE")
 /* how many of that write's bytes, its address byte the first, the part's
  * slave acknowledged */
 I2C_ASK(DELIVERED, "delivered CYCLE BUS COUNT", "OK")
+/* that write lost arbitration to the part's master after COUNT bytes the
+ * part's slave acknowledged: it went no further */
+I2C_ASK(BEATEN, "beaten CYCLE BUS COUNT", "OK")
 
 /* the part's own master on BUS */
 I2C_ASK(START, "start CYCLE BUS", "OK")
@@ -38,6 +41,9 @@ I2C_ASK(STOP, "stop CYCLE BUS", "OK")
 /* a byte it sends, the address byte after a START the first: whether a
  * slave acknowledges it */
 I2C_ASK(WRITE, "write CYCLE BUS BYTE", "ACK NACK")
+/* it lost arbitration to another master's write: the byte it was sending
+ * never went out, and its transfer ends there */
+I2C_ASK(LOST, "lost CYCLE BUS", "OK")
 /* a byte it reads: what the slave sends; then its own acknowledge */
 I2C_ASK(READ, "read CYCLE BUS", "DATA")
 I2C_ASK(MASTER_ACK, "master-ack CYCLE BUS ACK", "OK")

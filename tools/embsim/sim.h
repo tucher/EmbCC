@@ -477,12 +477,16 @@ int i2cbus_on(struct sim *s);
 void i2cbus_attach(struct sim *s, int bus, void *ctx,
                    void (*inject)(void *ctx, u64 at, const u8 *b, int n));
 void i2cbus_delivered(struct sim *s, int bus, int count);
+/* the write lost arbitration to the part's master after `count` bytes */
+void i2cbus_beaten(struct sim *s, int bus, int count);
 /* the unit's master: its conditions, a byte it sends (1: a slave
  * acknowledged it), a byte it reads, and its acknowledge of that byte */
 void i2cbus_start(struct sim *s, int bus);
 void i2cbus_restart(struct sim *s, int bus);
 void i2cbus_stop(struct sim *s, int bus);
 int i2cbus_write(struct sim *s, int bus, u8 byte);
+/* the part's master lost arbitration: the byte it sent never went out */
+void i2cbus_lost(struct sim *s, int bus);
 u8 i2cbus_read(struct sim *s, int bus);
 void i2cbus_master_ack(struct sim *s, int bus, int ack);
 

@@ -25,13 +25,23 @@
  *     byte the part did not acknowledge, with a Stop: P set, S clear.
  *     Another master's write to an address that is not the part's runs to
  *     its end: a slave outside the part answers it.
+ *   - Another master on the bus (§6): its write that comes due while the
+ *     part's master holds the bus waits for the part's Stop, as a master
+ *     that sees the bus busy does. One whose Start comes with the part's
+ *     contends for it: each byte both send is compared bit by bit, most
+ *     significant first, and the first that sends a 1 where the other
+ *     sends a 0 loses. The part losing sets BCL, clears TBF and TRSTAT and
+ *     raises MI2Cx at that bit, and its slave takes the rest of the
+ *     winner's write; the other losing goes no further, and the endpoint
+ *     is told. A Start while another master's write holds the bus collides:
+ *     BCL set, SEN cleared, MI2Cx raised.
  *   - I2CEN cleared resets the unit: no event under way, its status bits
  *     clear, SCLREL set. Reading I2CxRCV clears RBF; the program clears
  *     IWCOL, I2COV and BCL, and the rest of I2CxSTAT is the module's.
  * What the part's firmwares do not use ends the run, as "not modelled": a
  * read addressed to the part (slave transmission), 10-bit addresses, a
- * general call, the IPMI mode, another master on the bus while the part's
- * master is active (arbitration, bus collisions), the master writing to the
+ * general call, the IPMI mode, a Repeated Start, Stop, read or acknowledge
+ * while another master contends for the bus, the master writing to the
  * part's own address, a byte written to I2CxTRN with no Start before it,
  * and the unit disabled during another master's write to it. */
 #include <stdlib.h>
@@ -95,6 +105,7 @@ enum { OP_NONE, OP_START, OP_RESTART, OP_STOP, OP_TX, OP_RX, OP_ACK };
 struct outside {
     int on;                         /* another master's write is under way */
     int started, held, addressed;
+    int contending;                 /* its Start came with the part's: its bytes go with the master's */
     u64 at;                         /* the core's cycle its next step comes */
     u64 resume;                     /* held: the cycles from the release to the next step */
     u8 b[BUS_BYTES];
@@ -112,6 +123,7 @@ struct unit {
     u32 left;                       /* its cycles to go */
     int active;                     /* between the master's Start and its Stop */
     int ack;                        /* the slave's acknowledge of the byte going out */
+    int losing;                     /* the byte going out loses arbitration at its end */
     u8 rx;                          /* the byte coming in */
     struct outside o;
 };
@@ -178,11 +190,46 @@ static void clock_state(struct i2c *m)
 
 /* ---- the master -------------------------------------------------------- */
 
+#define NEVER (~0ull)
+#define BYTE_BITS 8
+#define TOP_BIT 0x80u
+
+/* the bit of `mine` the part's master loses at against `other`'s: 1 to 8, or
+ * 0 when the part wins at an earlier bit (or the bytes are the same) */
+static int losing_bit(u8 mine, u8 other)
+{
+    for (int bit = 1; bit <= BYTE_BITS; bit++, mine <<= 1, other <<= 1) {
+        if ((mine ^ other) & TOP_BIT)
+            return (mine & TOP_BIT) ? bit : 0;
+    }
+    return 0;
+}
+
+/* §6.5: a Start while another master's write holds the bus */
+static void start_collides(struct unit *u)
+{
+    set_stat(u, BCL, 0);
+    set_con(u, 0, SEN);
+    if (u->mirq >= 0)
+        pic24_irq(u->m->s, u->mirq);
+}
+
 static void begin(struct unit *u, int op, u32 periods)
 {
     struct sim *s = u->m->s;
-    if (u->o.on)
-        not_modelled(u, "a master event while another master's write is under way (§6)");
+    struct outside *o = &u->o;
+    if (o->on && o->contending && op != OP_TX)
+        not_modelled(u, "a Repeated Start, Stop, read or acknowledge while another master contends for the bus (§6)");
+    if (op == OP_START && o->on) {
+        if (o->started) {
+            start_collides(u);
+            return;
+        }
+        if (o->at <= s->cycles) {
+            o->started = o->contending = 1;
+            o->at = NEVER;
+        }
+    }
     u->op = op;
     u->left = periods * period(u);
     switch (op) {
@@ -198,6 +245,20 @@ static void begin(struct unit *u, int op, u32 periods)
         u8 byte = (u8)u->trn->value;
         if (u->active == 1 && ((byte >> 1) & ADDRESS_MASK) == ((u32)u->add->value & ADDRESS_MASK))
             not_modelled(u, "the master writing to the part's own address");
+        if (o->on && o->contending) {
+            int bit = losing_bit(byte, o->b[o->i]);
+            if (bit) {
+                u->losing = 1;
+                u->left = (u32)bit * BIT_PERIODS * period(u);
+                break;
+            }
+            if (byte != o->b[o->i]) {
+                o->on = 0;
+                i2cbus_beaten(s, u->k, o->acked);
+            } else if (++o->i == o->n) {
+                not_modelled(u, "another master ending its write while the part's master goes on (§6)");
+            }
+        }
         u->ack = on_bus(u) ? i2cbus_write(s, u->k, byte) : 0;
         u->active = 2;
         break;
@@ -230,6 +291,19 @@ static void finish(struct unit *u)
             i2cbus_stop(u->m->s, u->k);
         break;
     case OP_TX:
+        if (u->losing) {
+            /* §6.4, §6.7: the bus is the winner's; its byte goes on to the slaves */
+            struct outside *o = &u->o;
+            set_stat(u, BCL, TBF | TRSTAT);
+            u->losing = 0;
+            u->active = 0;
+            o->contending = 0;
+            o->at = u->m->s->cycles + (u64)(SENT_BITS - (u32)losing_bit((u8)u->trn->value, o->b[o->i])) *
+                                          outside_bit(u);
+            if (on_bus(u))
+                i2cbus_lost(u->m->s, u->k);
+            break;
+        }
         set_stat(u, u->ack ? 0 : ACKSTAT, TBF | TRSTAT | (u->ack ? ACKSTAT : 0));
         break;
     case OP_RX:
@@ -311,8 +385,15 @@ static void outside_step(struct unit *u)
     struct outside *o = &u->o;
     struct sim *s = u->m->s;
     if (!o->started) {
-        if (u->op != OP_NONE || u->active)
-            not_modelled(u, "another master's write while the part's master is active (§6)");
+        if (u->op == OP_START && !u->active) {
+            o->started = o->contending = 1;     /* both Starts at once: they contend */
+            o->at = NEVER;
+            return;
+        }
+        if (u->op != OP_NONE || u->active) {
+            o->at = s->cycles + outside_bit(u); /* the bus is busy: it waits */
+            return;
+        }
         o->started = 1;
         if (con(u) & I2CEN)
             set_stat(u, ST_S, ST_P);

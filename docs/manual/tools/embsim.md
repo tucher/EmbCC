@@ -1574,9 +1574,18 @@ the timers, UART1-4 and the ports with ANSELx; and the dsPIC33E's own:
     with RBF, D/A and R/W, an acknowledge and SI2Cx. A byte that arrives
     while RBF is set is not acknowledged and sets I2COV. With STREN the unit
     holds the clock until SCLREL. S and P track the bus.
+  - **Another master.** Its write that comes due while the part's master
+    holds the bus waits for the part's STOP. One that starts with the part's
+    START contends for the bus: each byte both send is compared bit by bit,
+    the most significant first, and the first master to send a 1 where the
+    other sends a 0 loses. The part losing sets BCL, clears TBF and TRSTAT
+    and raises MI2Cx at that bit, and its slave takes the rest of the
+    winner's write. A START while another master's write holds the bus
+    collides: BCL set, SEN cleared, MI2Cx raised (§6).
   - **Not modelled**, which ends the run so stating: slave transmission,
-    10-bit addresses, a general call, the IPMI mode, a bus collision or
-    arbitration, and the master writing to the part's own address.
+    10-bit addresses, a general call, the IPMI mode, a repeated START, STOP,
+    read or acknowledge while another master contends for the bus, and the
+    master writing to the part's own address.
 - **The flash controller (NVM)**, by the family reference manual's Flash
   Programming section (DS70609) and the data sheet's section 5, as the
   PIC24F's above with this family's NVMOP codes: two words (0001), a row
@@ -2169,10 +2178,15 @@ asked, at the core's estimated cycles, never of when the host got round to
 it.
 
 - **Polling.** The run polls once the core reaches the cycle the last
-  `idle` named, and again after its own master's STOP, since a slave may
-  answer what it was sent.
+  `idle` named, again after its own master's START (another master may
+  start with it), and after its STOP, since a slave may answer what it was
+  sent.
 - **Another master's write** goes to the unit that drives that bus. A write
-  on a bus no unit of the part drives ends the run (status 2).
+  on a bus no unit of the part drives ends the run (status 2). One that
+  comes due while the part's master holds the bus waits for its STOP; one
+  whose START comes with the part's contends for the bus. The endpoint is
+  told which master lost: `lost` when the part's master did, `beaten` with
+  the bytes the part's slave acknowledged when the other did.
 - **The part's inputs.** A poll can also answer that an input takes a value
   at that cycle, as `--set NAME=VALUE` gives it for a whole run: a pin of a
   part by its name goes `low` or `high`, or `undriven`, to its pull-up. The

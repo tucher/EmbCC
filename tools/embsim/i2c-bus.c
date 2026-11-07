@@ -5,8 +5,9 @@
  *
  *   - Polled after every instruction once the core reaches the cycle the
  *     endpoint's last "idle" named: nothing outside happens before it, so
- *     the run asks again only then, or when its own master has stopped (a
- *     slave may answer what it was sent).
+ *     the run asks again only then, when its own master has started
+ *     (another master may start with it), or when it has stopped (a slave
+ *     may answer what it was sent).
  *   - A write another master starts goes to the unit that drives that bus
  *     (i2cbus_attach), which clocks it into its slave and says how far the
  *     slave acknowledged it (i2cbus_delivered). A bus no unit drives ends
@@ -311,14 +312,30 @@ void i2cbus_delivered(struct sim *s, int bus, int count)
     b->next_poll = s->cycles;
 }
 
+void i2cbus_beaten(struct sim *s, int bus, int count)
+{
+    struct i2cbus *b = s->i2c;
+    expect_ok(b, ASK_BEATEN, "%llu %d %d", (unsigned long long)s->cycles, bus, count);
+    b->next_poll = s->cycles;
+}
+
+void i2cbus_lost(struct sim *s, int bus)
+{
+    expect_ok(s->i2c, ASK_LOST, "%llu %d", (unsigned long long)s->cycles, bus);
+}
+
 void i2cbus_start(struct sim *s, int bus)
 {
-    expect_ok(s->i2c, ASK_START, "%llu %d", (unsigned long long)s->cycles, bus);
+    struct i2cbus *b = s->i2c;
+    expect_ok(b, ASK_START, "%llu %d", (unsigned long long)s->cycles, bus);
+    b->next_poll = s->cycles;
 }
 
 void i2cbus_restart(struct sim *s, int bus)
 {
-    expect_ok(s->i2c, ASK_RESTART, "%llu %d", (unsigned long long)s->cycles, bus);
+    struct i2cbus *b = s->i2c;
+    expect_ok(b, ASK_RESTART, "%llu %d", (unsigned long long)s->cycles, bus);
+    b->next_poll = s->cycles;
 }
 
 void i2cbus_stop(struct sim *s, int bus)
