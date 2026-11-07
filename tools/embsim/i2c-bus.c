@@ -82,6 +82,7 @@ struct unit {
 struct i2cbus {
     struct sim *s;
     int on;                         /* an endpoint is connected, or replayed */
+    int counting;                   /* its poll keeps the core's clock counting */
     int fd;                         /* the endpoint, or -1 while replaying */
     u64 next_poll;
     struct unit unit[I2C_UNITS + 1];
@@ -251,6 +252,8 @@ void i2cbus_open(struct sim *s, const char *host, int port)
 {
     struct i2cbus *b = get(s);
     b->on = 1;
+    /* a core advances time for its devices only while one counts: the poll waits on time */
+    sim_clock(s, &b->counting, 1);
     if (s->ntick_fn == SIM_TICKERS)
         die("too many devices that keep time");
     s->tick_fn[s->ntick_fn] = poll_tick;

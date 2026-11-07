@@ -594,7 +594,7 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                tools/embsim/pic24-i2c.c tools/embsim/pic24-ic.c \
                tools/embsim/pic24-oc.c tools/embsim/pic24-ccp.c \
                tools/embsim/pic32-spi.c tools/embsim/pic32-adc10.c \
-               tools/embsim/pic24-dsp.c tools/embsim/pic24e-spi.c \
+               tools/embsim/pic24-dsp.c tools/embsim/pic24e-spi.c tools/embsim/pic24e-i2c.c \
                tools/embsim/pic24e-adc.c \
                tools/embsim/rp2040.c tools/embsim/rp2040-timer.c \
                tools/embsim/rp2040-io.c tools/embsim/rp2040-sio.c \

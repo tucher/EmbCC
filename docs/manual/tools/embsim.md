@@ -1560,6 +1560,23 @@ the timers, UART1-4 and the ports with ANSELx; and the dsPIC33E's own:
   interrupt.
 - **The PMP** in its master modes, as the PIC32's (PMDIN1 its data
   register, its wait states instruction cycles).
+- **I2C1-I2C2**, by the family reference manual's I2C section (DS70000195),
+  on the bus an I2C endpoint keeps (`--i2c-bus`), or on a bus with nothing
+  else on it without one.
+  - **The master.** Its events take the manual's BRG periods of I2CxBRG + 2
+    cycles, a bit two of them: a Start two, a Repeated Start and a Stop
+    three, a byte sent nine bits, a byte received eight. Each ends with
+    MI2Cx. TBF, TRSTAT, ACKSTAT, RBF and I2COV behave as the manual has
+    them. A write to I2CxTRN during an event sets IWCOL, and the lower five
+    bits of I2CxCON keep their value until it ends.
+  - **The slave** takes another master's write at 100 kHz. The address byte
+    is matched against I2CxADD and I2CxMSK, then each byte goes to I2CxRCV
+    with RBF, D/A and R/W, an acknowledge and SI2Cx. A byte that arrives
+    while RBF is set is not acknowledged and sets I2COV. With STREN the unit
+    holds the clock until SCLREL. S and P track the bus.
+  - **Not modelled**, which ends the run so stating: slave transmission,
+    10-bit addresses, a general call, the IPMI mode, a bus collision or
+    arbitration, and the master writing to the part's own address.
 
 A part by its name has no board around it, so nothing outside drives its
 pins: an input reads its pull-up (CNPUx), else 0. `--set RD5=low` drives
