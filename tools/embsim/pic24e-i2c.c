@@ -65,7 +65,15 @@
  *     (§7.5 shifts its bits out), and clears TBF; its ACK asks for another
  *     byte and holds SCLx again, its NACK ends the read; either raises
  *     SI2Cx with ACKSTAT the master's. The members run at one instruction
- *     clock, stepped together.
+ *     clock, stepped together. Between the events of its open frame the
+ *     master holds SCLx low, and SDAx after its Start or Repeated Start; a
+ *     slave with its byte loaded drives the byte's MSB (§5.2, §5.3): PORTx
+ *     reads them, and a port's drive under that SCLx makes no Start or Stop
+ *     (§2.1). A port driving the lines inside a master's event loses the
+ *     event's byte: the slaves go idle at the port's Stop, the receiving
+ *     master takes 1s from the port's bit on and 0s where the port held
+ *     SDAx, and a 1 the master sends under that SDAx, or its Start, Repeated
+ *     Start or Stop, collides (§6.4-§6.8).
  *   - The part's own slave stays armed while its master sends, as the
  *     bridge's transport relies on: a byte to the part's own address is its
  *     slave's, acknowledged and taken as any other master's, and its clock
@@ -77,11 +85,13 @@
  * part's own address, a byte written to I2CxTRN with no Start before it,
  * the unit disabled during another master's write to it, a Start of its
  * master while SDAx is held low and SCLx is high (§6.3: its first 1 would
- * lose), the lines changing while the part's master or another master's
- * write is on the bus, SCLx clocking after a Start seen on the lines (an
- * address at the pins), the outside holding low a line the port drives
- * high, the endpoint on a bus parts share, and a Repeated Start, Stop, read
- * or acknowledge while another part's master contends. */
+ * lose), the endpoint's lines changing while the part's master or another
+ * master's write is on the bus, SCLx clocking after a Start seen on the
+ * lines (an address at the pins), the outside holding low a line the port
+ * drives high, the endpoint on a bus parts share, a Repeated Start, Stop,
+ * read or acknowledge while another part's master contends, a port driving
+ * the lines while two parts' masters contend, and a master's event while
+ * another part's port holds its bus's lines low. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -142,6 +152,7 @@
 #define DRIVEN_HIGH 1
 #define DRIVEN_LOW 0
 #define NOT_DRIVEN (-1)
+#define NOT_PULLED (-1)
 #define WIRE_UNITS 4
 /* another master's clock: IPMB's */
 #define OUTSIDE_HZ 100000u
@@ -191,6 +202,11 @@ struct unit {
     int frozen;                     /* its master's event waits for a slave to let SCLx go */
     int awaiting;                   /* its byte waits for the rival's, to go with it */
     int sent;                       /* the bytes its master has sent since its Start */
+    int last;                       /* its master's last event to finish */
+    u32 total;                      /* the event under way's cycles, as it began */
+    int garbled;                    /* a port drove the lines inside that event: its byte is lost */
+    u8 garbled_rx;                  /* that event's byte, as the receiving master takes it */
+    int pulled_at;                  /* the bit a port pulled SDAx low at inside it, or NOT_PULLED */
 };
 
 /* a bus between parts' units (--wire) */
@@ -200,6 +216,7 @@ struct wire {
     struct unit *master;            /* the member whose master took the bus, to its Stop */
     int shared;                     /* two rivals' equal byte: 1 under way, 2 delivered */
     int shared_ack;                 /* the slaves' acknowledge of it */
+    int framing;                    /* the lines change by the master's frame, no port's drive */
 };
 
 struct i2c {
@@ -209,8 +226,11 @@ struct i2c {
     int running;
 };
 
+/* in a run of several parts, the message names the part */
 static void not_modelled(const struct unit *u, const char *what)
 {
+    if (u->m->s->never_idle)
+        die("part %d's I2C%d: not modelled: %s", u->m->s->part, u->k, what);
     die("I2C%d: not modelled: %s", u->k, what);
 }
 
@@ -273,6 +293,10 @@ static void clock_state(struct i2c *m)
 
 static void pins_changed(void *ctx, u64 when);
 static void wire_lines(struct wire *w);
+static void port_drove(struct unit *u, int scl_was, int sda_was);
+static void frame_changed(struct wire *w);
+static struct unit *frame_master(const struct wire *w);
+static int port_holds(const struct unit *u);
 
 /* the unit's pins, by FPOR's ALTI2Cx, once the image is loaded */
 static void find_pins(struct unit *u)
@@ -312,10 +336,11 @@ static void drive_changed(struct unit *u)
     int scl = pic24_pin_drive(s, u->scl), sda = pic24_pin_drive(s, u->sda);
     if (scl == u->scl_drive && sda == u->sda_drive)
         return;
+    int scl_was = u->scl_drive, sda_was = u->sda_drive;
     u->scl_drive = scl;
     u->sda_drive = sda;
     if (u->w) {
-        wire_lines(u->w);
+        port_drove(u, scl_was, sda_was);
         return;
     }
     if (!on_bus(u))
@@ -332,8 +357,9 @@ static void levels_changed(struct unit *u, int scl, int sda)
     u->sda_level = sda;
     if (u->o.on && u->o.started)
         not_modelled(u, "its bus's lines changing during another master's write");
-    if (u->w && u->w->master && u->w->master != u && (u->w->master->active || u->w->master->op != OP_NONE))
-        not_modelled(u, "its bus's lines changing while another part's master is on the bus");
+    /* a frame's own lines, and a port's under the SCLx a frame holds low (§2.1): no Start, no Stop */
+    if (u->w && (u->w->framing || frame_master(u->w)))
+        return;
     if (!(con(u) & I2CEN))
         return;
     if (u->op != OP_NONE || u->active)
@@ -419,6 +445,7 @@ static int take(struct unit *u, u8 byte);
 #define NEVER (~0ull)
 #define BYTE_BITS 8
 #define TOP_BIT 0x80u
+#define BYTE_MASK 0xffu
 
 /* the bit of `mine` the part's master loses at against `other`'s: 1 to 8, or
  * 0 when the part wins at an earlier bit (or the bytes are the same) */
@@ -452,6 +479,8 @@ static void begin(struct unit *u, int op, u32 periods)
         not_modelled(u, "a Start while SDAx is held low and SCLx is high (§6.3: its first 1 would lose)");
     if (u->w && !wire_begin(u, op))
         return;
+    if (u->w && op != OP_START && port_holds(u))
+        not_modelled(u, "an event of the part's master while another part's port holds its bus's lines low");
     if (o->on && o->contending && op != OP_TX)
         not_modelled(u, "a Repeated Start, Stop, read or acknowledge while another master contends for the bus (§6)");
     if (op == OP_START && o->on) {
@@ -466,6 +495,9 @@ static void begin(struct unit *u, int op, u32 periods)
     }
     u->op = op;
     u->left = periods * period(u);
+    u->total = u->left;
+    u->garbled = 0;
+    u->pulled_at = NOT_PULLED;
     /* §6.2: a slave holding SCLx low suspends the master's clock, the part's own too */
     u->frozen = op != OP_START && (u->w ? wire_held(u->w) : u->sl.holding);
     switch (op) {
@@ -513,8 +545,12 @@ static void begin(struct unit *u, int op, u32 periods)
     clock_state(u->m);
 }
 
+static int wire_pulled_to_the_end(struct unit *u);
+
 static void finish(struct unit *u)
 {
+    if (u->w && wire_pulled_to_the_end(u))
+        return;
     switch (u->op) {
     case OP_START:
     case OP_RESTART:
@@ -554,7 +590,7 @@ static void finish(struct unit *u)
             break;
         }
         if (u->w)
-            u->ack = wire_deliver(u);
+            u->ack = u->garbled ? 0 : wire_deliver(u);
         /* the part's own slave stays armed while its master sends (the transport's slave
          * handler, i2c1_bus_slave_isr_handler, relies on it): a byte to its address it takes */
         u->ack |= take(u, (u8)u->trn->value);
@@ -563,7 +599,7 @@ static void finish(struct unit *u)
         break;
     case OP_RX:
         if (u->w)
-            u->rx = wire_read(u);
+            u->rx = u->garbled ? u->garbled_rx : wire_read(u);
         if (stat(u) & RBF) {
             set_stat(u, I2COV, 0);
         } else {
@@ -578,7 +614,12 @@ static void finish(struct unit *u)
             wire_acked(u, !(con(u) & ACKDT));
         break;
     }
+    u->last = u->op;
     u->op = OP_NONE;
+    u->garbled = 0;
+    u->pulled_at = NOT_PULLED;
+    if (u->w)
+        frame_changed(u->w);
     if (u->mirq >= 0)
         pic24_irq(u->m->s, u->mirq);
 }
@@ -706,12 +747,16 @@ static void outside_step(struct unit *u)
 
 /* ---- a bus between parts' units (--wire) -------------------------------- */
 
-/* the lines' wired-AND: each member's outside is what the others hold low */
+static void frame_holds(struct wire *w, int *scl, int *sda);
+
+/* the lines' wired-AND: each member's outside is what the open frame and the others hold low */
 static void wire_lines(struct wire *w)
 {
+    int frame_scl, frame_sda;
+    frame_holds(w, &frame_scl, &frame_sda);
     for (int i = 0; i < w->n; i++) {
         struct unit *x = w->m[i];
-        int scl = 0, sda = 0;
+        int scl = frame_scl, sda = frame_sda;
         for (int j = 0; j < w->n; j++) {
             if (w->m[j] == x)
                 continue;
@@ -740,6 +785,8 @@ static void wire_released(struct wire *w)
         return;
     for (int i = 0; i < w->n; i++)
         if (w->m[i]->frozen) {
+            if (port_holds(w->m[i]))
+                not_modelled(w->m[i], "the part's master going on while another part's port holds its bus's lines low");
             w->m[i]->frozen = 0;
             clock_state(w->m[i]->m);
         }
@@ -865,6 +912,178 @@ static struct unit *transmitter(struct wire *w)
         if (w->m[i]->sl.read)
             return w->m[i];
     return 0;
+}
+
+/* the member whose master's frame is open, its Start done and no Stop yet; 0 when none is */
+static struct unit *frame_master(const struct wire *w)
+{
+    return w->master && w->master->active ? w->master : 0;
+}
+
+/* §5.2 (Figure 5-3), §5.3: between its events the master of an open frame holds SCLx low; SDAx
+ * is low after its Start or Repeated Start, and after an address or acknowledge the slave drives
+ * its loaded byte's MSB (Figure 5-4). Inside an event the lines are as between: what a port finds
+ * there, its bit under way's, is not looked at. */
+static void frame_holds(struct wire *w, int *scl, int *sda)
+{
+    struct unit *m = frame_master(w);
+    *scl = *sda = 0;
+    if (!m)
+        return;
+    *scl = 1;
+    if (m->last == OP_START || m->last == OP_RESTART) {
+        *sda = 1;
+        return;
+    }
+    struct unit *x = transmitter(w);
+    *sda = x && (stat(x) & TBF) && !((u32)x->trn->value & TOP_BIT);
+}
+
+/* the frame changed the lines, no port's drive: no Start or Stop comes of it */
+static void frame_changed(struct wire *w)
+{
+    w->framing = 1;
+    wire_lines(w);
+    w->framing = 0;
+}
+
+/* another member's port holds a line of the bus low */
+static int port_holds(const struct unit *u)
+{
+    for (int i = 0; i < u->w->n; i++) {
+        const struct unit *x = u->w->m[i];
+        if (x != u && (x->scl_drive == DRIVEN_LOW || x->sda_drive == DRIVEN_LOW))
+            return 1;
+    }
+    return 0;
+}
+
+static int bit_under_way(const struct unit *m)
+{
+    return (int)((m->total - m->left) / (BIT_PERIODS * period(m)));
+}
+
+/* §6.4: the master's event ends in a bus collision: halted, TBF clear, its lines let go, its
+ * frame over */
+static void collided(struct unit *m)
+{
+    set_stat(m, BCL, TBF | TRSTAT);
+    set_con(m, 0, EVENTS);
+    m->op = OP_NONE;
+    m->active = 0;
+    m->garbled = 0;
+    m->pulled_at = NOT_PULLED;
+    if (m->w->master == m)
+        m->w->master = 0;
+    clock_state(m->m);
+    if (m->mirq >= 0)
+        pic24_irq(m->m->s, m->mirq);
+}
+
+/* §2.1: a port's bus clear ends in its Stop: every member's slave goes back to idle, no byte
+ * taken until a Start addresses it, a slave transmitter's byte gone */
+static void slaves_lost(struct wire *w)
+{
+    for (int i = 0; i < w->n; i++) {
+        struct unit *x = w->m[i];
+        if (x->sl.read)
+            set_stat(x, 0, TBF);
+        if (con(x) & I2CEN)
+            set_stat(x, ST_P, ST_S);
+        x->sl.i = 1;
+        x->sl.addressed = x->sl.read = 0;
+    }
+}
+
+/* §6.4, §6.7: whether the master sends a 1 in bits FROM to TO of its event */
+static int sends_a_1(const struct unit *m, int from, int to)
+{
+    if (m->op == OP_ACK)
+        return (con(m) & ACKDT) != 0;
+    if (m->op != OP_TX)
+        return 0;
+    for (int bit = from; bit <= to && bit < BYTE_BITS; bit++)
+        if (((u8)m->trn->value << bit) & TOP_BIT)
+            return 1;
+    return 0;
+}
+
+/* a port held SDAx low over bits FROM to TO: a 1 the master sends under it collides, and a
+ * receiving master takes those bits as 0s; whether the master collided */
+static int pulled_under(struct unit *m, int from, int to)
+{
+    if (sends_a_1(m, from, to)) {
+        collided(m);
+        return 1;
+    }
+    if (m->op == OP_RX)
+        for (int bit = from; bit <= to && bit < BYTE_BITS; bit++)
+            m->garbled_rx &= (u8)~(TOP_BIT >> bit);
+    return 0;
+}
+
+/* §2.1, §6.2: a port inside the master's event. Its edges come between the master's clock's,
+ * which does not follow them, and its bus clear's Stop ends the slaves' part: the byte under way
+ * is lost, and the receiving master, not seeing it, takes the slave's bits before the port's and
+ * 1s after. A Start, Repeated Start or Stop the port's lines meet collides (§6.5, §6.6, §6.8).
+ * Whether the master's frame ended */
+static int disturbed(struct unit *m, int sda_pulled, int sda_let_go)
+{
+    int bit = bit_under_way(m);
+    if (m->op == OP_START || m->op == OP_RESTART || m->op == OP_STOP) {
+        slaves_lost(m->w);
+        collided(m);
+        return 1;
+    }
+    if (!m->garbled) {
+        struct unit *x = transmitter(m->w);
+        u8 kept = (u8)(BYTE_MASK << (BYTE_BITS - (bit < BYTE_BITS ? bit : BYTE_BITS)));
+        u8 sent = x && (stat(x) & TBF) ? (u8)x->trn->value : BYTE_MASK;
+        m->garbled = 1;
+        m->garbled_rx = (u8)((sent & kept) | ~kept);
+        slaves_lost(m->w);
+    }
+    if (sda_pulled)
+        m->pulled_at = bit;
+    if (sda_let_go && m->pulled_at != NOT_PULLED) {
+        int from = m->pulled_at;
+        m->pulled_at = NOT_PULLED;
+        return pulled_under(m, from, bit);
+    }
+    return 0;
+}
+
+/* a member's port drove the bus's lines: inside another member's master's event it disturbs the
+ * event; between the events of a frame, under its SCLx held low, it makes no Start or Stop */
+static void port_drove(struct unit *u, int scl_was, int sda_was)
+{
+    struct wire *w = u->w;
+    struct unit *m = w->master;
+    int sda_pulled = u->sda_drive == DRIVEN_LOW && sda_was != DRIVEN_LOW;
+    int sda_let_go = sda_was == DRIVEN_LOW && u->sda_drive != DRIVEN_LOW;
+    int pulled = sda_pulled || (u->scl_drive == DRIVEN_LOW && scl_was != DRIVEN_LOW);
+    if (m && m != u && m->op != OP_NONE && !m->frozen && (pulled || sda_let_go)) {
+        if (m->rival || m->awaiting)
+            not_modelled(m, "another part's port driving the bus's lines while two parts' masters contend for it (§6)");
+        if (disturbed(m, sda_pulled, sda_let_go)) {
+            frame_changed(w);
+            return;
+        }
+    }
+    wire_lines(w);
+}
+
+/* a port still holding SDAx low as the master's event ends: whether the master collided */
+static int wire_pulled_to_the_end(struct unit *u)
+{
+    if (!u->garbled || u->pulled_at == NOT_PULLED)
+        return 0;
+    int from = u->pulled_at;
+    u->pulled_at = NOT_PULLED;
+    if (!pulled_under(u, from, BYTE_BITS))
+        return 0;
+    frame_changed(u->w);
+    return 1;
 }
 
 /* §7.5: the byte the read's slave sends, I2CxTRN's, its eight bits out; none, the pull-ups */
@@ -1013,7 +1232,10 @@ static void reset_unit(struct unit *u)
         if (u->rival)
             u->rival->rival = 0;
         u->rival = 0;
+        u->garbled = 0;
+        u->pulled_at = NOT_PULLED;
         wire_released(w);
+        frame_changed(w);
     }
     rf_hw(u->stat, 0);
     set_con(u, SCLREL, 0);
@@ -1035,6 +1257,8 @@ static void i2c_write(void *ctx, u32 off, int n, u32 v)
         if (u->sl.read && !u->active) {
             rf_write(m->p, off, n, v);
             set_stat(u, TBF | D_A, 0);  /* §7.5, Figure 7-15: the slave's byte; D/A says data */
+            if (u->w)
+                frame_changed(u->w);
             return;
         }
         if (u->op != OP_NONE || (con(u) & EVENTS)) {

@@ -530,9 +530,9 @@ int main(int argc, char **argv)
         char uart_host[256];
         if (!q)
             die("out of memory");
+        sim_init(q, bd, cpu, svd);
         q->part = p + 1;
         q->never_idle = 1;
-        sim_init(q, bd, cpu, svd);
         q->max_insns = max_insns;
         q->semihosting = semihosting;
         q->reset_runs_on = reset_runs_on;
