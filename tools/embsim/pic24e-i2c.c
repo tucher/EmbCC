@@ -58,10 +58,15 @@
  *     its end, any slave's acknowledge counting. A slave that holds SCLx
  *     low suspends the master's next event until it lets go (§6.2). A Start
  *     while another member's master holds the bus collides (§6.5); two
- *     Starts under way together contend byte by byte, the loser setting BCL
- *     at its losing bit and its slave taking the winner's bytes (§6.3, §6.4,
- *     §6.7). Addressed for a read, a slave sets R/W and holds SCLx until the
- *     program lets go (§7.5.1); the master reads I2CxTRN, written or not
+ *     Starts under way together contend byte by byte at the slower clock
+ *     (§6.2), the loser setting BCL at its losing bit and its slave taking
+ *     the winner's bytes (§6.3, §6.4, §6.7). While their bytes have not
+ *     differed, an event of one waits for the other's next, its clock held
+ *     by the other's SCLx (§6.2): the same event from both goes on together,
+ *     and a Repeated Start or Stop against data, or a NACK against an ACK,
+ *     loses, the other going on alone (§6.3, §6.6, §6.8). Addressed for a
+ *     read, a slave sets R/W and holds SCLx until the program lets go
+ *     (§7.5.1); the master reads I2CxTRN, written or not
  *     (§7.5 shifts its bits out), and clears TBF; its ACK asks for another
  *     byte and holds SCLx again, its NACK ends the read; either raises
  *     SI2Cx with ACKSTAT the master's. The members run at one instruction
@@ -88,10 +93,10 @@
  * lose), the endpoint's lines changing while the part's master or another
  * master's write is on the bus, SCLx clocking after a Start seen on the
  * lines (an address at the pins), the outside holding low a line the port
- * drives high, the endpoint on a bus parts share, a Repeated Start, Stop,
- * read or acknowledge while another part's master contends, a port driving
- * the lines while two parts' masters contend, and a master's event while
- * another part's port holds its bus's lines low. */
+ * drives high, the endpoint on a bus parts share, two parts' masters whose
+ * bytes have not differed going on to other events than those, a port
+ * driving the lines while two parts' masters contend, and a master's event
+ * while another part's port holds its bus's lines low. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -434,7 +439,7 @@ static void take_pins(struct unit *u, int level)
 
 static int wire_begin(struct unit *u, int op);
 static int wire_held(const struct wire *w);
-static void wire_send(struct unit *u);
+static void wire_meet(struct unit *u);
 static int wire_deliver(struct unit *u);
 static void wire_started(struct unit *u);
 static void wire_stopped(struct unit *u);
@@ -530,8 +535,6 @@ static void begin(struct unit *u, int op, u32 periods)
         }
         u->ack = on_bus(u) ? i2cbus_write(s, u->k, byte) : 0;
         u->active = 2;
-        if (u->w)
-            wire_send(u);
         break;
     }
     case OP_RX:
@@ -542,6 +545,8 @@ static void begin(struct unit *u, int op, u32 periods)
             i2cbus_master_ack(s, u->k, !(con(u) & ACKDT));
         break;
     }
+    if (u->w && u->rival && op != OP_START)
+        wire_meet(u);
     clock_state(u->m);
 }
 
@@ -566,6 +571,8 @@ static void finish(struct unit *u)
         set_stat(u, ST_P, ST_S);
         set_con(u, 0, PEN);
         u->active = 0;
+        if (u->rival)
+            u->rival = u->rival->rival = 0;
         if (on_bus(u))
             i2cbus_stop(u->m->s, u->k);
         if (u->w)
@@ -797,12 +804,8 @@ static void wire_released(struct wire *w)
 static int wire_begin(struct unit *u, int op)
 {
     struct wire *w = u->w;
-    if (op != OP_START) {
-        if (u->rival && op != OP_TX)
-            not_modelled(u, "a Repeated Start, Stop, read or acknowledge while another part's master "
-                            "contends for the bus (§6)");
+    if (op != OP_START)
         return 1;
-    }
     for (int i = 0; i < w->n; i++)
         if (pic24_fcy(w->m[i]->m->s) != pic24_fcy(u->m->s))
             not_modelled(u, "parts at different instruction clocks on one bus");
@@ -826,14 +829,14 @@ static void contend(struct unit *a, struct unit *b)
 {
     struct wire *w = a->w;
     u8 x = (u8)a->trn->value, y = (u8)b->trn->value;
+    /* §6.2: their clocks synchronised, the bits go at the slower one's */
+    u32 p = period(a) > period(b) ? period(a) : period(b);
     a->awaiting = b->awaiting = 0;
-    a->left = SENT_BITS * BIT_PERIODS * period(a);
-    b->left = SENT_BITS * BIT_PERIODS * period(b);
+    a->left = a->total = b->left = b->total = SENT_BITS * BIT_PERIODS * p;
     if (x != y) {
         struct unit *loser = losing_bit(x, y) ? a : b, *winner = loser == a ? b : a;
         loser->losing = 1;
-        loser->left = (u32)losing_bit((u8)loser->trn->value, (u8)winner->trn->value) * BIT_PERIODS *
-                      period(loser);
+        loser->left = (u32)losing_bit((u8)loser->trn->value, (u8)winner->trn->value) * BIT_PERIODS * p;
         loser->sl.i = winner->sent;
         loser->sl.addressed = 0;
         loser->rival = winner->rival = 0;
@@ -843,18 +846,6 @@ static void contend(struct unit *a, struct unit *b)
     }
     clock_state(a->m);
     clock_state(b->m);
-}
-
-/* a master's byte: with a rival, it waits for the rival's byte to go with it */
-static void wire_send(struct unit *u)
-{
-    struct unit *r = u->rival;
-    if (!r)
-        return;
-    if (r->op == OP_TX && r->awaiting)
-        contend(u, r);
-    else
-        u->awaiting = 1;
 }
 
 /* the byte reaches the other members' slaves at its end: whether any acknowledged it */
@@ -1073,6 +1064,67 @@ static void port_drove(struct unit *u, int scl_was, int sda_was)
     wire_lines(w);
 }
 
+/* §6.3, §6.6, §6.8: the master whose event meets the other's data or ACK loses: its event ends
+ * in a bus collision, and the other's goes on alone */
+static void loses(struct unit *loser, struct unit *winner)
+{
+    struct wire *w = loser->w;
+    loser->rival = winner->rival = 0;
+    loser->awaiting = 0;
+    collided(loser);
+    w->master = winner;
+    if (winner->awaiting) {
+        winner->awaiting = 0;
+        clock_state(winner->m);
+    }
+    frame_changed(w);
+}
+
+/* the same event from both: they go on together, at the slower clock (§6.2) */
+static void together(struct unit *a, struct unit *b)
+{
+    u32 left = a->left > b->left ? a->left : b->left;
+    a->awaiting = b->awaiting = 0;
+    a->left = a->total = b->left = b->total = left;
+    clock_state(a->m);
+    clock_state(b->m);
+}
+
+static void meet(struct unit *a, struct unit *b)
+{
+    if (a->op == OP_TX && b->op == OP_TX) {
+        contend(a, b);
+        return;
+    }
+    if (a->op == b->op && (a->op != OP_ACK || !(con(a) & ACKDT) == !(con(b) & ACKDT))) {
+        together(a, b);
+        return;
+    }
+    struct unit *loser;
+    if (a->op == OP_ACK && b->op == OP_ACK)
+        loser = (con(a) & ACKDT) ? a : b;                       /* §6.3: the NACK */
+    else if ((a->op == OP_RESTART || a->op == OP_STOP) && b->op == OP_TX)
+        loser = a;                                              /* §6.6, §6.8 */
+    else if ((b->op == OP_RESTART || b->op == OP_STOP) && a->op == OP_TX)
+        loser = b;
+    else
+        not_modelled(a, "two parts' masters whose bytes have not differed going on to a Repeated "
+                        "Start, Stop or read against anything but data, or a read against data (§6)");
+    loses(loser, loser == a ? b : a);
+}
+
+/* §6.2, §6.7: two masters whose bytes have not differed go on together. An event of one waits,
+ * its clock held by the other's SCLx low between events, for the other's next; there they meet */
+static void wire_meet(struct unit *u)
+{
+    struct unit *r = u->rival;
+    if (r->op == OP_NONE || !r->awaiting) {
+        u->awaiting = 1;
+        return;
+    }
+    meet(u, r);
+}
+
 /* a port still holding SDAx low as the master's event ends: whether the master collided */
 static int wire_pulled_to_the_end(struct unit *u)
 {
@@ -1229,8 +1281,14 @@ static void reset_unit(struct unit *u)
         struct wire *w = u->w;
         if (w->master == u)
             w->master = 0;
-        if (u->rival)
-            u->rival->rival = 0;
+        if (u->rival) {
+            struct unit *r = u->rival;
+            r->rival = 0;
+            if (r->awaiting) {
+                r->awaiting = 0;    /* its clock no longer held by this one's */
+                clock_state(r->m);
+            }
+        }
         u->rival = 0;
         u->garbled = 0;
         u->pulled_at = NOT_PULLED;
