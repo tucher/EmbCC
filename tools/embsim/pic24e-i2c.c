@@ -200,6 +200,7 @@ struct unit {
     int scl_out, sda_out;           /* the outside holds them low */
     int pin_start;                  /* a Start seen on the lines, no Stop since */
     struct {
+        int started;                /* the module on at the write's Start: §7.3, it looks for its address */
         int i;                      /* bytes of the write so far, its address the first */
         int addressed;              /* that address is the part's */
         int read;                   /* addressed for a read: the slave transmits */
@@ -573,6 +574,7 @@ static void finish(struct unit *u)
         u->active = 1;
         u->sent = 0;
         u->sl.i = u->sl.addressed = u->sl.read = 0;
+        u->sl.started = 1;
         if (u->w)
             wire_started(u);
         break;
@@ -682,7 +684,7 @@ static int take(struct unit *u, u8 byte)
         if ((byte >> 1) == GENERAL_CALL && (c & GCEN))
             not_modelled(u, "a general call");
         u32 mask = (u32)u->msk->value & ADDRESS_MASK;
-        u->sl.addressed = (c & I2CEN) &&
+        u->sl.addressed = u->sl.started && (c & I2CEN) &&
                           (((byte >> 1) ^ (u32)u->add->value) & ADDRESS_MASK & ~mask) == 0;
         u->sl.read = 0;
         if (!u->sl.addressed)
@@ -735,6 +737,7 @@ static void outside_step(struct unit *u)
         }
         o->started = 1;
         u->sl.i = u->sl.addressed = 0;
+        u->sl.started = (con(u) & I2CEN) != 0;
         if (con(u) & I2CEN)
             set_stat(u, ST_S, ST_P);
         o->at = s->cycles + SENT_BITS * outside_bit(u);
@@ -901,6 +904,7 @@ static void wire_started(struct unit *u)
         if (con(x) & I2CEN)
             set_stat(x, ST_S, ST_P);
         x->sl.i = x->sl.addressed = x->sl.read = 0;
+        x->sl.started = (con(x) & I2CEN) != 0;
     }
 }
 
