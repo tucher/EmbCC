@@ -1356,7 +1356,8 @@ static void reset_unit(struct unit *u)
         frame_changed(w);
     }
     rf_hw(u->stat, 0);
-    set_con(u, SCLREL, 0);
+    /* Register 3-1, §11.0: the module's reset ends the event under way, its control bit with it */
+    set_con(u, SCLREL, EVENTS);
     take_pins(u, NOT_DRIVEN);
 }
 
