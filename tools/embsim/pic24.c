@@ -2143,6 +2143,7 @@ struct cpu *pic24_create(struct sim *s, const char *model,
                   (u16)(bd->mem[2].base - PIC24_DATA) : e ? 0x1000 : 0x0800;
     k->prog_end = bd && bd->mem[0].size ? bd->mem[0].size / 2 : 0xac000;
     s->cpu = &k->cpu;
+    s->hz = pic24_fcy;
     cpu_reset(&k->cpu);
     return &k->cpu;
 }

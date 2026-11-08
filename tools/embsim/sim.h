@@ -395,6 +395,11 @@ struct sim {
     FILE *out;
     /* its number among the run's parts (--part), 1 for the first */
     int part;
+    /* the core's instruction clock in Hz, by which parts at different clocks keep one time
+     * (sim_run_parts), or 0 when the core does not say; hz_changed is set when what it reads
+     * changes */
+    u32 (*hz)(struct sim *s);
+    int hz_changed;
     /* another part may change what this one waits on: a loop nothing in
      * the part can interrupt goes on, and does not end the run */
     int never_idle;

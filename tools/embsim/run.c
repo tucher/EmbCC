@@ -11,6 +11,7 @@
  *   - the output contains --until's string;
  *   - --max-insns runs out. */
 #include <stdarg.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -234,31 +235,71 @@ void sim_step(struct sim *s)
                 (unsigned long long)s->insns);
 }
 
+#define PS_PER_S 1e12
+
+/* a part's time since the run began, in picoseconds: `base` when its clock last changed, at
+ * `base_cycles`, and `ps_per_cycle` since; `now` as of its last step. Parts that do not say
+ * their clock count cycles */
+struct part_time {
+    double base, ps_per_cycle, now;
+    u64 base_cycles;
+};
+
+static double time_of(const struct sim *s, const struct part_time *t)
+{
+    return t->base + (double)(s->cycles - t->base_cycles) * t->ps_per_cycle;
+}
+
+static void set_clock(struct sim *s, struct part_time *t, int clocked)
+{
+    t->base = time_of(s, t);
+    t->base_cycles = s->cycles;
+    t->ps_per_cycle = clocked ? PS_PER_S / s->hz(s) : 1.0;
+    s->hz_changed = 0;
+}
+
 /* Several parts in one run: each step goes to the part furthest behind in
- * cycles (of those level, the first), so the parts stay within an
- * instruction of each other; the run ends when one of them ends. A part's
- * step moves no other part's cycles and ends no other part, so the part
- * chosen keeps the steps until it passes the one next behind it. */
+ * time (of those level, the first), so the parts stay within an
+ * instruction of each other, whatever their clocks; the run ends when one
+ * of them ends. Parts whose cores do not say their clock keep it in cycles.
+ * A part's step moves no other part's time and ends no other part, so the
+ * part chosen keeps the steps until it passes the one next behind it. */
 struct sim *sim_run_parts(struct sim *const *part, int n)
 {
+    struct part_time *time = calloc((size_t)n, sizeof *time);
+    int clocked = 1;
+    if (!time)
+        die("out of memory");
+    for (int i = 0; i < n; i++)
+        clocked &= part[i]->hz != 0;
+    for (int i = 0; i < n; i++) {
+        time[i].base_cycles = part[i]->cycles;
+        set_clock(part[i], &time[i], clocked);
+    }
     for (;;) {
         int next = -1, rival = -1;
         for (int i = 0; i < n; i++) {
-            if (part[i]->state != RUN)
+            if (part[i]->state != RUN) {
+                free(time);
                 return part[i];
-            if (next < 0 || part[i]->cycles < part[next]->cycles) {
+            }
+            if (next < 0 || time[i].now < time[next].now) {
                 rival = next;
                 next = i;
-            } else if (rival < 0 || part[i]->cycles < part[rival]->cycles) {
+            } else if (rival < 0 || time[i].now < time[rival].now) {
                 rival = i;
             }
         }
         struct sim *s = part[next];
-        u64 bound = rival < 0 ? ~0ull : part[rival]->cycles;
+        struct part_time *t = &time[next];
+        double bound = rival < 0 ? HUGE_VAL : time[rival].now;
         int first = rival < 0 || next < rival;
-        do
+        do {
             sim_step(s);
-        while (s->state == RUN && (s->cycles < bound || (first && s->cycles == bound)));
+            if (s->hz_changed)
+                set_clock(s, t, clocked);
+            t->now = time_of(s, t);
+        } while (s->state == RUN && (t->now < bound || (first && t->now == bound)));
     }
 }
 

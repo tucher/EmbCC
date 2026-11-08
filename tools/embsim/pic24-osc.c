@@ -55,6 +55,7 @@ static void locked(struct osc *o, const char *half)
 static void osc_write(void *ctx, u32 off, int n, u32 v)
 {
     struct osc *o = ctx;
+    o->s->hz_changed = 1;
     u32 at = rf_off(o->osccon);
     if (off != at && off != at + 1) {
         rf_write(o->p, off, n, v);
@@ -104,6 +105,7 @@ static void osc_write(void *ctx, u32 off, int n, u32 v)
 static void osc_reset(void *ctx)
 {
     struct osc *o = ctx;
+    o->s->hz_changed = 1;
     u32 fnosc = pic24_prog(o->s, FOSCSEL_ADDR(o->s)) & 7;
     u32 v = (u32)(o->osccon->value & ~0x7700ull) | fnosc << 12 | fnosc << 8;
     v = (fnosc == 1 || fnosc == 3) ? v | 0x20 : v & ~0x20u;

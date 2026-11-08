@@ -817,9 +817,6 @@ static int wire_begin(struct unit *u, int op)
     struct wire *w = u->w;
     if (op != OP_START)
         return 1;
-    for (int i = 0; i < w->n; i++)
-        if (pic24_fcy(w->m[i]->m->s) != pic24_fcy(u->m->s))
-            not_modelled(u, "parts at different instruction clocks on one bus");
     struct unit *holder = w->master;
     if (!holder || holder == u) {
         w->master = u;
@@ -834,6 +831,19 @@ static int wire_begin(struct unit *u, int op)
     return 0;
 }
 
+/* LEFT cycles of unit FROM's clock, on unit TO's: one time on two parts' clocks */
+static u32 on_clock_of(const struct unit *to, const struct unit *from, u64 left)
+{
+    u32 hz_to = pic24_fcy(to->m->s), hz_from = pic24_fcy(from->m->s);
+    return hz_to == hz_from ? (u32)left : (u32)(left * hz_to / hz_from);
+}
+
+/* whether A's LEFT cycles last longer than B's, each on its own part's clock */
+static int lasts_longer(const struct unit *a, u32 left_a, const struct unit *b, u32 left_b)
+{
+    return (u64)left_a * pic24_fcy(b->m->s) > (u64)left_b * pic24_fcy(a->m->s);
+}
+
 /* §6.3, §6.7: two rivals' bytes go bit by bit together; the one that sends a 1 where the
  * other sends a 0 loses at that bit, and the other's byte goes on */
 static void contend(struct unit *a, struct unit *b)
@@ -841,13 +851,15 @@ static void contend(struct unit *a, struct unit *b)
     struct wire *w = a->w;
     u8 x = (u8)a->trn->value, y = (u8)b->trn->value;
     /* §6.2: their clocks synchronised, the bits go at the slower one's */
-    u32 p = period(a) > period(b) ? period(a) : period(b);
+    const struct unit *slow = lasts_longer(b, period(b), a, period(a)) ? b : a;
     a->awaiting = b->awaiting = 0;
-    a->left = a->total = b->left = b->total = SENT_BITS * BIT_PERIODS * p;
+    a->left = a->total = on_clock_of(a, slow, (u64)SENT_BITS * BIT_PERIODS * period(slow));
+    b->left = b->total = on_clock_of(b, slow, (u64)SENT_BITS * BIT_PERIODS * period(slow));
     if (x != y) {
         struct unit *loser = losing_bit(x, y) ? a : b, *winner = loser == a ? b : a;
         loser->losing = 1;
-        loser->left = (u32)losing_bit((u8)loser->trn->value, (u8)winner->trn->value) * BIT_PERIODS * p;
+        loser->left = on_clock_of(loser, slow, (u64)losing_bit((u8)loser->trn->value, (u8)winner->trn->value) *
+                                                   BIT_PERIODS * period(slow));
         loser->sl.i = winner->sent;
         loser->sl.addressed = 0;
         loser->rival = winner->rival = 0;
@@ -1143,9 +1155,11 @@ static void loses(struct unit *loser, struct unit *winner)
 /* the same event from both: they go on together, at the slower clock (§6.2) */
 static void together(struct unit *a, struct unit *b)
 {
-    u32 left = a->left > b->left ? a->left : b->left;
+    struct unit *slow = lasts_longer(b, b->left, a, a->left) ? b : a, *fast = slow == a ? b : a;
     a->awaiting = b->awaiting = 0;
-    a->left = a->total = b->left = b->total = left;
+    fast->left = on_clock_of(fast, slow, slow->left);
+    a->total = a->left;
+    b->total = b->left;
     clock_state(a->m);
     clock_state(b->m);
 }
